@@ -81,6 +81,7 @@ class TradeAlert:
     profit_usdt: float
     position_usdt: float
     details: str
+    workflow: list[str]
     profit_last_hour: float
     profit_last_24h: float
     timestamp: 'datetime'  # type: ignore[name-defined]

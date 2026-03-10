@@ -87,21 +87,72 @@ class ArbitrageBotService:
         if opp.strategy == 'cross_exchange':
             d = opp.details
             assert isinstance(d, CrossExchangeDetails)
+            coin = d.symbol.split('/')[0]
             return (
-                f'Купить на {d.buy_exchange} по ${d.buy_price:.2f} → '
-                f'продать на {d.sell_exchange} по ${d.sell_price:.2f} | '
-                f'Объём: {d.max_qty:.6f}'
+                f'{d.buy_exchange} ask ${d.buy_price:.4f} → '
+                f'{d.sell_exchange} bid ${d.sell_price:.4f} | '
+                f'{d.max_qty:.6f} {coin}'
             )
         if opp.strategy == 'triangular':
             d = opp.details
             assert isinstance(d, TriangularDetails)
-            return f'Путь: {" → ".join(d.path)} | {d.start_amount:.2f} → {d.end_amount:.2f} USDT'
+            return f'Путь: {" → ".join(d.path)} | ${d.start_amount:.2f} → ${d.end_amount:.2f}'
         d = opp.details
         assert isinstance(d, FuturesSpotDetails)
         return (
-            f'Спот: ${d.spot_price:.2f} | Фьюч: ${d.futures_price:.2f} | '
+            f'Спот: ${d.spot_price:.4f} | Фьюч: ${d.futures_price:.4f} | '
             f'Базис: {d.basis_percent:.4f}% | Ставка: {d.funding_rate * 100:.4f}%'
         )
+
+    def _build_workflow(self, opp: ArbitrageOpportunity) -> list[str]:
+        if opp.strategy == 'cross_exchange':
+            d = opp.details
+            assert isinstance(d, CrossExchangeDetails)
+            coin = d.symbol.split('/')[0]
+            qty = d.max_qty
+            return [
+                f'1️⃣ Купить <b>{qty:.6f} {coin}</b> на <b>{d.buy_exchange}</b> по ${d.buy_price:.4f}',
+                f'   Затраты: ${qty * d.buy_price:.4f} + комиссия ${d.buy_fee:.4f}',
+                f'2️⃣ Перевести {coin} на <b>{d.sell_exchange}</b>',
+                f'3️⃣ Продать <b>{qty:.6f} {coin}</b> на <b>{d.sell_exchange}</b> по ${d.sell_price:.4f}',
+                f'   Выручка: ${qty * d.sell_price:.4f} − комиссия ${d.sell_fee:.4f}',
+            ]
+
+        if opp.strategy == 'triangular':
+            d = opp.details
+            assert isinstance(d, TriangularDetails)
+            steps = []
+            for i, step in enumerate(d.path[:-1], 1):
+                steps.append(f'{i}️⃣ {d.path[i-1]} → <b>{d.path[i]}</b>  (биржа: {d.exchange})')
+            steps.append(f'✅ Итог: ${d.start_amount:.2f} → <b>${d.end_amount:.4f}</b> USDT')
+            return steps
+
+        d = opp.details
+        assert isinstance(d, FuturesSpotDetails)
+        coin = d.symbol.split('/')[0]
+        rate_pct = d.funding_rate * 100
+        rate_sign = '+' if rate_pct >= 0 else ''
+
+        if d.basis < 0:
+            direction = 'Обратный кэш-энд-кэрри'
+            who_receives = 'лонги получают' if rate_pct < 0 else 'шорты получают'
+            return [
+                f'📌 <b>{direction}</b> (фьюч дешевле спота)',
+                f'1️⃣ Продать спот <b>{coin}</b> по <b>${d.spot_price:.4f}</b>',
+                f'2️⃣ Купить фьюч <b>{coin} LONG</b> по <b>${d.futures_price:.4f}</b>',
+                f'3️⃣ Ставка фин-я: {rate_sign}{rate_pct:.4f}%/8ч → <b>{who_receives}</b>',
+                f'4️⃣ Закрыть обе позиции при схождении базиса к 0',
+            ]
+        else:
+            direction = 'Кэш-энд-кэрри'
+            who_receives = 'шорты получают' if rate_pct > 0 else 'лонги получают'
+            return [
+                f'📌 <b>{direction}</b> (фьюч дороже спота)',
+                f'1️⃣ Купить спот <b>{coin}</b> по <b>${d.spot_price:.4f}</b>',
+                f'2️⃣ Открыть фьюч <b>{coin} SHORT</b> по <b>${d.futures_price:.4f}</b>',
+                f'3️⃣ Ставка фин-я: {rate_sign}{rate_pct:.4f}%/8ч → <b>{who_receives}</b>',
+                f'4️⃣ Закрыть обе позиции при схождении базиса к 0',
+            ]
 
     async def _run_cycle(self) -> None:
         try:
@@ -137,6 +188,7 @@ class ArbitrageBotService:
                             profit_usdt=trade.actual_profit_usdt or opp.profit_usdt,
                             position_usdt=opp.position_size_usdt,
                             details=self._build_alert_details(opp),
+                            workflow=self._build_workflow(opp),
                             profit_last_hour=self._portfolio.profit_last_hour(),
                             profit_last_24h=self._portfolio.profit_last_24h(),
                             timestamp=datetime.now(),

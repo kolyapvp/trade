@@ -43,10 +43,18 @@ class TelegramAlertService(IAlertService):
             f'📊 Пара: <code>{alert.symbol}</code>',
             f'{profit_emoji} Прибыль: <b>+{alert.profit_percent:.4f}%</b>  /  <b>+${alert.profit_usdt:.4f}</b>',
             f'💰 Позиция: ${alert.position_usdt:.0f}',
-            f'ℹ️ {alert.details}',
+        ]
+
+        if alert.workflow:
+            lines.append('')
+            lines.append('📋 <b>Как работает сделка:</b>')
+            lines.extend(alert.workflow)
+
+        hour_str = f'{hour_sign}${alert.profit_last_hour:.4f}'
+        day_str = f'{day_sign}${alert.profit_last_24h:.4f}'
+        lines += [
             '',
-            f'📈 За последний час: <b>{hour_sign}${alert.profit_last_hour:.4f}</b>',
-            f'📅 За 24 часа: <b>{day_sign}${alert.profit_last_24h:.4f}</b>',
+            f'📈 За час: <b>{hour_str}</b>  |  За 24ч: <b>{day_str}</b>',
             f'🕐 {alert.timestamp.strftime("%d.%m.%Y %H:%M:%S")}',
         ]
         return '\n'.join(lines)
