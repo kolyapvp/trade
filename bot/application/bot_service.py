@@ -11,7 +11,14 @@ from .use_cases import (
 )
 from ..domain.entities import ArbitrageOpportunity, VirtualTrade, Portfolio, FuturesSpotPosition
 from ..domain.entities import CrossExchangeDetails, TriangularDetails, FuturesSpotDetails
-from ..domain.ports import IAlertService, TradeAlert
+from ..domain.ports import (
+    IAlertService,
+    IMetricsService,
+    ScanTelemetry,
+    SignalTelemetry,
+    TradeAlert,
+    TradeTelemetry,
+)
 
 
 @dataclass
@@ -37,6 +44,7 @@ class ArbitrageBotService:
         mode: str,
         scan_interval_ms: int,
         position_manager: FuturesSpotPositionManager,
+        metrics_service: IMetricsService,
         alert_service: Optional[IAlertService] = None,
     ):
         self._scanner = scanner
@@ -47,6 +55,7 @@ class ArbitrageBotService:
         self._mode = mode
         self._scan_interval_ms = scan_interval_ms
         self._position_manager = position_manager
+        self._metrics = metrics_service
         self._alert_service = alert_service
         self._running = False
         self._stats = BotStats()
@@ -80,8 +89,10 @@ class ArbitrageBotService:
         )
 
     async def start(self) -> None:
+        self._metrics.start()
         self._running = True
         self._stats.is_running = True
+        self._metrics.set_bot_running(True)
         while self._running:
             await self._run_cycle()
             if self._running:
@@ -90,9 +101,103 @@ class ArbitrageBotService:
     def stop(self) -> None:
         self._running = False
         self._stats.is_running = False
+        self._metrics.set_bot_running(False)
 
     async def get_report(self):
         return await self._reporter.execute()
+
+    def _build_signal_telemetry(self, opp: ArbitrageOpportunity) -> SignalTelemetry:
+        if opp.strategy == 'cross_exchange':
+            d = opp.details
+            assert isinstance(d, CrossExchangeDetails)
+            return SignalTelemetry(
+                strategy=opp.strategy,
+                symbol=opp.symbol,
+                route_type='cross_exchange',
+                expected_profit_usdt=opp.profit_usdt,
+                expected_profit_percent=opp.profit_percent,
+                position_usdt=opp.position_size_usdt,
+                buy_exchange=d.buy_exchange,
+                sell_exchange=d.sell_exchange,
+            )
+
+        if opp.strategy == 'triangular':
+            d = opp.details
+            assert isinstance(d, TriangularDetails)
+            return SignalTelemetry(
+                strategy=opp.strategy,
+                symbol=opp.symbol,
+                route_type='single_exchange',
+                expected_profit_usdt=opp.profit_usdt,
+                expected_profit_percent=opp.profit_percent,
+                position_usdt=opp.position_size_usdt,
+                exchange=d.exchange,
+            )
+
+        d = opp.details
+        assert isinstance(d, FuturesSpotDetails)
+        route_type = 'cross_exchange' if d.spot_exchange != d.futures_exchange else 'same_exchange'
+        return SignalTelemetry(
+            strategy=opp.strategy,
+            symbol=opp.symbol,
+            route_type=route_type,
+            expected_profit_usdt=opp.profit_usdt,
+            expected_profit_percent=opp.profit_percent,
+            position_usdt=opp.position_size_usdt,
+            spot_exchange=d.spot_exchange,
+            futures_exchange=d.futures_exchange,
+        )
+
+    def _build_trade_telemetry(
+        self,
+        strategy: str,
+        symbol: str,
+        expected_profit_usdt: float,
+        expected_profit_percent: float,
+        realized_profit_usdt: float,
+        position_usdt: float,
+        details: CrossExchangeDetails | TriangularDetails | FuturesSpotDetails,
+    ) -> TradeTelemetry:
+        if strategy == 'cross_exchange':
+            assert isinstance(details, CrossExchangeDetails)
+            return TradeTelemetry(
+                strategy=strategy,
+                symbol=symbol,
+                route_type='cross_exchange',
+                expected_profit_usdt=expected_profit_usdt,
+                expected_profit_percent=expected_profit_percent,
+                realized_profit_usdt=realized_profit_usdt,
+                position_usdt=position_usdt,
+                buy_exchange=details.buy_exchange,
+                sell_exchange=details.sell_exchange,
+            )
+
+        if strategy == 'triangular':
+            assert isinstance(details, TriangularDetails)
+            return TradeTelemetry(
+                strategy=strategy,
+                symbol=symbol,
+                route_type='single_exchange',
+                expected_profit_usdt=expected_profit_usdt,
+                expected_profit_percent=expected_profit_percent,
+                realized_profit_usdt=realized_profit_usdt,
+                position_usdt=position_usdt,
+                exchange=details.exchange,
+            )
+
+        assert isinstance(details, FuturesSpotDetails)
+        route_type = 'cross_exchange' if details.spot_exchange != details.futures_exchange else 'same_exchange'
+        return TradeTelemetry(
+            strategy=strategy,
+            symbol=symbol,
+            route_type=route_type,
+            expected_profit_usdt=expected_profit_usdt,
+            expected_profit_percent=expected_profit_percent,
+            realized_profit_usdt=realized_profit_usdt,
+            position_usdt=position_usdt,
+            spot_exchange=details.spot_exchange,
+            futures_exchange=details.futures_exchange,
+        )
 
     def _build_alert_details(self, opp: ArbitrageOpportunity) -> str:
         if opp.strategy == 'cross_exchange':
@@ -170,22 +275,40 @@ class ArbitrageBotService:
             self._stats.scan_count += 1
             self._stats.last_scan_at = result.scanned_at
             self._stats.last_scan_duration_ms = result.duration_ms
-            self._stats.total_opportunities_found += len(result.opportunities)
+            self._stats.total_opportunities_found += len(result.observed_opportunities)
+            self._metrics.record_scan(ScanTelemetry(
+                scanned_at=result.scanned_at,
+                duration_ms=result.duration_ms,
+                opportunities_count=len(result.observed_opportunities),
+                errors_count=len(result.errors),
+            ))
+            self._metrics.set_open_positions(len(self._position_manager.open_positions))
 
             if result.errors:
                 self._stats.errors = result.errors[-10:]
                 for e in result.errors:
+                    self._metrics.record_error('scan')
                     if self._on_error:
                         self._on_error(e)
 
             if self._on_scan:
-                self._on_scan(result.opportunities, result.duration_ms)
+                self._on_scan(result.observed_opportunities, result.duration_ms)
 
             closed_positions = await self._position_manager.check_and_close(
                 result.spot_prices, result.futures_prices
             )
             for pos, trade in closed_positions:
                 self._stats.total_trades_executed += 1
+                self._metrics.record_trade(self._build_trade_telemetry(
+                    strategy='futures_spot',
+                    symbol=trade.symbol,
+                    expected_profit_usdt=trade.expected_profit_usdt,
+                    expected_profit_percent=trade.expected_profit_percent,
+                    realized_profit_usdt=trade.actual_profit_usdt or 0.0,
+                    position_usdt=trade.position_size_usdt,
+                    details=trade.details,
+                ))
+                self._metrics.set_open_positions(len(self._position_manager.open_positions))
                 if self._on_position_closed:
                     self._on_position_closed(pos, trade)
                 if self._alert_service:
@@ -212,6 +335,11 @@ class ArbitrageBotService:
                     )
                     asyncio.create_task(self._alert_service.send_trade_alert(alert))
 
+            for opp in result.observed_opportunities:
+                if not opp.is_profitable(self._scan_config.min_profit_percent):
+                    continue
+                self._metrics.record_signal(self._build_signal_telemetry(opp))
+
             for opp in result.opportunities:
                 if not opp.is_profitable(self._scan_config.min_profit_percent):
                     continue
@@ -221,6 +349,7 @@ class ArbitrageBotService:
                         continue
                     if self._mode == 'demo':
                         self._position_manager.open_position(opp)
+                        self._metrics.set_open_positions(len(self._position_manager.open_positions))
                         if self._on_opportunity:
                             self._on_opportunity(opp, None)
                         if self._alert_service:
@@ -242,6 +371,15 @@ class ArbitrageBotService:
                     if self._mode == 'demo':
                         trade = await self._executor.execute(opp)
                         self._stats.total_trades_executed += 1
+                        self._metrics.record_trade(self._build_trade_telemetry(
+                            strategy=trade.strategy,
+                            symbol=trade.symbol,
+                            expected_profit_usdt=trade.expected_profit_usdt,
+                            expected_profit_percent=trade.expected_profit_percent,
+                            realized_profit_usdt=trade.actual_profit_usdt or 0.0,
+                            position_usdt=trade.position_size_usdt,
+                            details=trade.details,
+                        ))
                         if self._on_opportunity:
                             self._on_opportunity(opp, trade)
                         if self._alert_service:
@@ -263,5 +401,6 @@ class ArbitrageBotService:
         except Exception as e:
             msg = f'Bot cycle error: {e}'
             self._stats.errors.append(msg)
+            self._metrics.record_error('run_cycle')
             if self._on_error:
                 self._on_error(msg)

@@ -27,6 +27,8 @@ class AppConfig:
     scan_interval_ms: int
     min_profit_percent: float
     max_position_usdt: float
+    metrics_enabled: bool
+    metrics_port: int
     log_file: str
     exchanges: dict[str, ExchangeCredentials]
     telegram: TelegramConfig
@@ -47,6 +49,8 @@ config = AppConfig(
     scan_interval_ms=int(os.getenv('SCAN_INTERVAL_MS', '3000')),
     min_profit_percent=float(os.getenv('MIN_PROFIT_PERCENT', '0.1')),
     max_position_usdt=float(os.getenv('MAX_POSITION_USDT', '100')),
+    metrics_enabled=os.getenv('METRICS_ENABLED', 'true').lower() != 'false',
+    metrics_port=int(os.getenv('METRICS_PORT', '9108')),
     log_file=os.getenv('LOG_FILE', 'trades.json'),
     exchanges={
         'binance': ExchangeCredentials(

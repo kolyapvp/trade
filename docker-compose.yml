@@ -7,8 +7,47 @@ services:
       - ./data:/app/data
     environment:
       LOG_FILE: /app/data/trades.json
+      METRICS_ENABLED: 'true'
+      METRICS_PORT: '9108'
+    expose:
+      - '9108'
+    ports:
+      - '${BOT_METRICS_HOST_PORT:-9108}:9108'
     logging:
       driver: json-file
       options:
         max-size: '10m'
         max-file: '3'
+
+  prometheus:
+    image: prom/prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - '${PROMETHEUS_HOST_PORT:-9190}:9090'
+    depends_on:
+      - trade-bot
+
+  grafana:
+    image: grafana/grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - '${GRAFANA_HOST_PORT:-3300}:3000'
+    depends_on:
+      - prometheus
+
+volumes:
+  prometheus-data:
+  grafana-data:

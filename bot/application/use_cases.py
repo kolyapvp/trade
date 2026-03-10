@@ -36,6 +36,7 @@ class ScanConfig:
 @dataclass
 class ScanResult:
     opportunities: list[ArbitrageOpportunity]
+    observed_opportunities: list[ArbitrageOpportunity]
     scanned_at: datetime
     duration_ms: int
     errors: list[str]
@@ -53,6 +54,7 @@ class ScanOpportunitiesUseCase:
     async def execute(self, cfg: ScanConfig) -> ScanResult:
         start = datetime.now()
         opportunities: list[ArbitrageOpportunity] = []
+        observed_opportunities: list[ArbitrageOpportunity] = []
         errors: list[str] = []
         exchange_data: list[dict] = []
 
@@ -94,6 +96,7 @@ class ScanOpportunitiesUseCase:
                     exchange_data, symbol, cfg.position_size_usdt, cfg.min_profit_percent
                 )
                 opportunities.extend(found)
+                observed_opportunities.extend(found)
 
         if cfg.enable_triangular:
             for ex_data in exchange_data:
@@ -110,6 +113,7 @@ class ScanOpportunitiesUseCase:
                     cfg.min_profit_percent,
                 )
                 opportunities.extend(found)
+                observed_opportunities.extend(found)
 
         futures_prices: dict[str, dict[str, float]] = {}
         futures_funding: dict[str, dict[str, float]] = {}
@@ -159,6 +163,7 @@ class ScanOpportunitiesUseCase:
                                 long_only=cfg.futures_spot_long_only,
                             )
                             if opp:
+                                observed_opportunities.append(opp)
                                 prev = best_per_symbol.get(symbol)
                                 if prev is None or opp.profit_percent > prev.profit_percent:
                                     best_per_symbol[symbol] = opp
@@ -172,6 +177,7 @@ class ScanOpportunitiesUseCase:
         duration = int((datetime.now() - start).total_seconds() * 1000)
         return ScanResult(
             opportunities=opportunities,
+            observed_opportunities=observed_opportunities,
             scanned_at=datetime.now(),
             duration_ms=duration,
             errors=errors,

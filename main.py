@@ -8,6 +8,7 @@ from bot.config import config
 from bot.domain.entities import Portfolio
 from bot.infrastructure.exchange_factory import ExchangeFactory
 from bot.infrastructure.file_repository import FileTradeRepository
+from bot.infrastructure.metrics_service import NullMetricsService, PrometheusMetricsService
 from bot.infrastructure.telegram_service import TelegramAlertService
 from bot.application.use_cases import (
     ScanOpportunitiesUseCase,
@@ -41,6 +42,10 @@ async def bootstrap() -> None:
     dashboard.print_info(f'Интервал сканирования: {config.scan_interval_ms}мс')
     dashboard.print_info(f'Мин. прибыль: {config.min_profit_percent}%')
     dashboard.print_info(f'Макс. позиция: ${config.max_position_usdt}')
+    dashboard.print_info(
+        f'Метрики: {"включены" if config.metrics_enabled else "выключены"}'
+        f'{" на порту " + str(config.metrics_port) if config.metrics_enabled else ""}'
+    )
 
     factory = ExchangeFactory()
     cx = config.exchanges
@@ -99,6 +104,10 @@ async def bootstrap() -> None:
 
     repository = FileTradeRepository(config.log_file)
     portfolio = Portfolio(initial_capital=10_000.0)
+    metrics_service = (
+        PrometheusMetricsService(config.metrics_port)
+        if config.metrics_enabled else NullMetricsService()
+    )
 
     scan_cfg = ScanConfig(
         symbols=config.pairs,
@@ -126,6 +135,7 @@ async def bootstrap() -> None:
         mode=config.mode,
         scan_interval_ms=config.scan_interval_ms,
         position_manager=position_manager,
+        metrics_service=metrics_service,
         alert_service=alert_service,
     )
 

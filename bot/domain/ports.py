@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 from .value_objects import Fee, OrderBook
@@ -99,4 +100,73 @@ class TradeAlert:
 class IAlertService(abc.ABC):
     @abc.abstractmethod
     async def send_trade_alert(self, alert: TradeAlert) -> None:
+        ...
+
+
+@dataclass(frozen=True)
+class ScanTelemetry:
+    scanned_at: datetime
+    duration_ms: int
+    opportunities_count: int
+    errors_count: int
+
+
+@dataclass(frozen=True)
+class SignalTelemetry:
+    strategy: str
+    symbol: str
+    route_type: str
+    expected_profit_usdt: float
+    expected_profit_percent: float
+    position_usdt: float
+    exchange: str = ''
+    buy_exchange: str = ''
+    sell_exchange: str = ''
+    spot_exchange: str = ''
+    futures_exchange: str = ''
+
+
+@dataclass(frozen=True)
+class TradeTelemetry:
+    strategy: str
+    symbol: str
+    route_type: str
+    expected_profit_usdt: float
+    expected_profit_percent: float
+    realized_profit_usdt: float
+    position_usdt: float
+    exchange: str = ''
+    buy_exchange: str = ''
+    sell_exchange: str = ''
+    spot_exchange: str = ''
+    futures_exchange: str = ''
+
+
+class IMetricsService(abc.ABC):
+    @abc.abstractmethod
+    def start(self) -> None:
+        ...
+
+    @abc.abstractmethod
+    def set_bot_running(self, is_running: bool) -> None:
+        ...
+
+    @abc.abstractmethod
+    def set_open_positions(self, total: int) -> None:
+        ...
+
+    @abc.abstractmethod
+    def record_scan(self, telemetry: ScanTelemetry) -> None:
+        ...
+
+    @abc.abstractmethod
+    def record_signal(self, telemetry: SignalTelemetry) -> None:
+        ...
+
+    @abc.abstractmethod
+    def record_trade(self, telemetry: TradeTelemetry) -> None:
+        ...
+
+    @abc.abstractmethod
+    def record_error(self, stage: str, exchange: str = '', symbol: str = '') -> None:
         ...
