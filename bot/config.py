@@ -98,8 +98,8 @@ config = AppConfig(
         'NEAR/USDT', 'INJ/USDT',
     ],
     strategies={
-        'cross_exchange': True,
-        'triangular': True,
+        'cross_exchange': False,
+        'triangular': False,
         'futures_spot': True,
     },
     futures_spot_long_only=os.getenv('FUTURES_SPOT_LONG_ONLY', 'true').lower() != 'false',

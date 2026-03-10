@@ -96,18 +96,24 @@ class Dashboard:
                 f'Базис: {d.basis_percent:.4f}% | Ставка: {d.funding_rate * 100:.4f}%[/dim]'
             )
 
-        actual = trade.actual_profit_usdt or 0
-        console.print(
-            f'  [dim]Позиция: ${opp.position_size_usdt:.0f} | '
-            f'[green]Виртуальная прибыль: +${actual:.4f}[/green][/dim]'
-        )
+        if trade is not None:
+            actual = trade.actual_profit_usdt or 0
+            console.print(
+                f'  [dim]Позиция: ${opp.position_size_usdt:.0f} | '
+                f'[green]Виртуальная прибыль: +${actual:.4f}[/green][/dim]'
+            )
+        else:
+            console.print(
+                f'  [dim]Позиция: ${opp.position_size_usdt:.0f} | [cyan]Позиция открыта[/cyan][/dim]'
+            )
 
     def print_position_closed(self, pos: FuturesSpotPosition, trade: VirtualTrade) -> None:
         profit = trade.actual_profit_usdt or 0
         profit_style = 'bold green' if profit >= 0 else 'bold red'
         profit_sign = '+' if profit >= 0 else ''
-        h = int(pos.hours_open())
-        m = int((pos.hours_open() - h) * 60)
+        total_sec = int(pos.hours_open() * 3600)
+        h = total_sec // 3600
+        m = (total_sec % 3600) // 60
         console.print()
         console.print(
             f'[bold white]◈ [ЗАКРЫТА][/bold white] '

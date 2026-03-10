@@ -65,9 +65,16 @@ class TelegramAlertService(IAlertService):
         day_sign = '+' if alert.profit_last_24h >= 0 else ''
 
         hours = alert.hours_held or 0.0
-        h = int(hours)
-        m = int((hours - h) * 60)
-        duration_str = f'{h}ч {m}мин' if h > 0 else f'{m}мин'
+        total_seconds = int(hours * 3600)
+        h = total_seconds // 3600
+        m = (total_seconds % 3600) // 60
+        s = total_seconds % 60
+        if h > 0:
+            duration_str = f'{h}ч {m}мин'
+        elif m > 0:
+            duration_str = f'{m}мин {s}сек'
+        else:
+            duration_str = f'{s}сек'
 
         lines = [
             '◈ <b>ФЬЮЧ-СПОТ — ПОЗИЦИЯ ЗАКРЫТА</b>',
