@@ -85,6 +85,15 @@ class TradeAlert:
     profit_last_hour: float
     profit_last_24h: float
     timestamp: 'datetime'  # type: ignore[name-defined]
+    alert_type: str = 'opened'
+    hours_held: Optional[float] = None
+    close_reason: Optional[str] = None
+    entry_spot_price: Optional[float] = None
+    entry_futures_price: Optional[float] = None
+    entry_basis_percent: Optional[float] = None
+    exit_spot_price: Optional[float] = None
+    exit_futures_price: Optional[float] = None
+    exit_basis_percent: Optional[float] = None
 
 
 class IAlertService(abc.ABC):

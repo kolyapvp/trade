@@ -13,6 +13,7 @@ from bot.application.use_cases import (
     ScanOpportunitiesUseCase,
     ExecuteDemoTradeUseCase,
     GenerateReportUseCase,
+    FuturesSpotPositionManager,
     ScanConfig,
     TriangularPathConfig,
 )
@@ -112,7 +113,9 @@ async def bootstrap() -> None:
 
     scanner = ScanOpportunitiesUseCase(active_spot, futures_exchanges)
     executor = ExecuteDemoTradeUseCase(repository, portfolio)
+    position_manager = FuturesSpotPositionManager(repository, portfolio)
     reporter = GenerateReportUseCase(repository, portfolio)
+    reporter.set_position_manager(position_manager)
 
     bot = ArbitrageBotService(
         scanner=scanner,
@@ -122,6 +125,7 @@ async def bootstrap() -> None:
         scan_config=scan_cfg,
         mode=config.mode,
         scan_interval_ms=config.scan_interval_ms,
+        position_manager=position_manager,
         alert_service=alert_service,
     )
 
@@ -130,6 +134,7 @@ async def bootstrap() -> None:
         dashboard.print_scan_result(opps, dur),
     ))
     bot.set_opportunity_handler(lambda opp, trade: dashboard.print_opportunity(opp, trade))
+    bot.set_position_closed_handler(lambda pos, trade: dashboard.print_position_closed(pos, trade))
     bot.set_error_handler(lambda err: dashboard.print_error(err))
 
     async def shutdown() -> None:

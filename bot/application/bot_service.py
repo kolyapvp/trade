@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Callable, Optional
 
-from .use_cases import ScanOpportunitiesUseCase, ExecuteDemoTradeUseCase, GenerateReportUseCase, ScanConfig
-from ..domain.entities import ArbitrageOpportunity, VirtualTrade, Portfolio
+from .use_cases import (
+    ScanOpportunitiesUseCase, ExecuteDemoTradeUseCase,
+    GenerateReportUseCase, ScanConfig, FuturesSpotPositionManager,
+)
+from ..domain.entities import ArbitrageOpportunity, VirtualTrade, Portfolio, FuturesSpotPosition
 from ..domain.entities import CrossExchangeDetails, TriangularDetails, FuturesSpotDetails
 from ..domain.ports import IAlertService, TradeAlert
 
@@ -19,6 +22,7 @@ class BotStats:
     last_scan_duration_ms: int = 0
     total_opportunities_found: int = 0
     total_trades_executed: int = 0
+    open_positions_count: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -32,6 +36,7 @@ class ArbitrageBotService:
         scan_config: ScanConfig,
         mode: str,
         scan_interval_ms: int,
+        position_manager: FuturesSpotPositionManager,
         alert_service: Optional[IAlertService] = None,
     ):
         self._scanner = scanner
@@ -41,13 +46,14 @@ class ArbitrageBotService:
         self._scan_config = scan_config
         self._mode = mode
         self._scan_interval_ms = scan_interval_ms
+        self._position_manager = position_manager
         self._alert_service = alert_service
         self._running = False
         self._stats = BotStats()
         self._on_opportunity: Optional[Callable] = None
         self._on_scan: Optional[Callable] = None
         self._on_error: Optional[Callable] = None
-        self._futures_spot_cooldown: dict[str, datetime] = {}
+        self._on_position_closed: Optional[Callable] = None
 
     def set_opportunity_handler(self, handler: Callable) -> None:
         self._on_opportunity = handler
@@ -58,6 +64,9 @@ class ArbitrageBotService:
     def set_error_handler(self, handler: Callable) -> None:
         self._on_error = handler
 
+    def set_position_closed_handler(self, handler: Callable) -> None:
+        self._on_position_closed = handler
+
     def get_stats(self) -> BotStats:
         return BotStats(
             is_running=self._stats.is_running,
@@ -66,6 +75,7 @@ class ArbitrageBotService:
             last_scan_duration_ms=self._stats.last_scan_duration_ms,
             total_opportunities_found=self._stats.total_opportunities_found,
             total_trades_executed=self._stats.total_trades_executed,
+            open_positions_count=len(self._position_manager.open_positions),
             errors=list(self._stats.errors),
         )
 
@@ -151,7 +161,7 @@ class ArbitrageBotService:
                 f'1️⃣ Купить спот <b>{coin}</b> на <b>{d.spot_exchange}</b> по ${d.spot_price:.4f}',
                 f'2️⃣ Открыть фьюч <b>{coin} SHORT</b> на <b>{d.futures_exchange}</b> по ${d.futures_price:.4f}',
                 f'3️⃣ Ставка фин-я: {rate_sign}{rate_pct:.4f}%/8ч → <b>{who_receives}</b>',
-                f'4️⃣ Закрыть позиции при схождении базиса к 0',
+                f'4️⃣ Позиция будет закрыта ботом автоматически при схождении базиса',
             ]
 
     async def _run_cycle(self) -> None:
@@ -171,36 +181,84 @@ class ArbitrageBotService:
             if self._on_scan:
                 self._on_scan(result.opportunities, result.duration_ms)
 
+            closed_positions = await self._position_manager.check_and_close(
+                result.spot_prices, result.futures_prices
+            )
+            for pos, trade in closed_positions:
+                self._stats.total_trades_executed += 1
+                if self._on_position_closed:
+                    self._on_position_closed(pos, trade)
+                if self._alert_service:
+                    alert = TradeAlert(
+                        strategy='futures_spot',
+                        symbol=pos.symbol,
+                        profit_percent=trade.expected_profit_percent,
+                        profit_usdt=trade.actual_profit_usdt or 0.0,
+                        position_usdt=pos.position_usdt,
+                        details='',
+                        workflow=[],
+                        profit_last_hour=self._portfolio.profit_last_hour(),
+                        profit_last_24h=self._portfolio.profit_last_24h(),
+                        timestamp=datetime.now(),
+                        alert_type='closed',
+                        hours_held=pos.hours_open(),
+                        close_reason=pos.close_reason,
+                        entry_spot_price=pos.entry_spot_price,
+                        entry_futures_price=pos.entry_futures_price,
+                        entry_basis_percent=pos.entry_basis_percent,
+                        exit_spot_price=pos.exit_spot_price,
+                        exit_futures_price=pos.exit_futures_price,
+                        exit_basis_percent=pos.exit_basis_percent,
+                    )
+                    asyncio.create_task(self._alert_service.send_trade_alert(alert))
+
             for opp in result.opportunities:
                 if not opp.is_profitable(self._scan_config.min_profit_percent):
                     continue
 
                 if opp.strategy == 'futures_spot':
-                    cooldown_until = self._futures_spot_cooldown.get(opp.symbol)
-                    if cooldown_until and datetime.now() < cooldown_until:
+                    if self._position_manager.has_open_position(opp.symbol):
                         continue
-                    self._futures_spot_cooldown[opp.symbol] = datetime.now() + timedelta(hours=4)
-
-                if self._mode == 'demo':
-                    trade = await self._executor.execute(opp)
-                    self._stats.total_trades_executed += 1
-                    if self._on_opportunity:
-                        self._on_opportunity(opp, trade)
-
-                    if self._alert_service:
-                        alert = TradeAlert(
-                            strategy=opp.strategy,
-                            symbol=opp.symbol,
-                            profit_percent=opp.profit_percent,
-                            profit_usdt=trade.actual_profit_usdt or opp.profit_usdt,
-                            position_usdt=opp.position_size_usdt,
-                            details=self._build_alert_details(opp),
-                            workflow=self._build_workflow(opp),
-                            profit_last_hour=self._portfolio.profit_last_hour(),
-                            profit_last_24h=self._portfolio.profit_last_24h(),
-                            timestamp=datetime.now(),
-                        )
-                        asyncio.create_task(self._alert_service.send_trade_alert(alert))
+                    if self._mode == 'demo':
+                        self._position_manager.open_position(opp)
+                        if self._on_opportunity:
+                            self._on_opportunity(opp, None)
+                        if self._alert_service:
+                            alert = TradeAlert(
+                                strategy=opp.strategy,
+                                symbol=opp.symbol,
+                                profit_percent=opp.profit_percent,
+                                profit_usdt=opp.profit_usdt,
+                                position_usdt=opp.position_size_usdt,
+                                details=self._build_alert_details(opp),
+                                workflow=self._build_workflow(opp),
+                                profit_last_hour=self._portfolio.profit_last_hour(),
+                                profit_last_24h=self._portfolio.profit_last_24h(),
+                                timestamp=datetime.now(),
+                                alert_type='opened',
+                            )
+                            asyncio.create_task(self._alert_service.send_trade_alert(alert))
+                else:
+                    if self._mode == 'demo':
+                        trade = await self._executor.execute(opp)
+                        self._stats.total_trades_executed += 1
+                        if self._on_opportunity:
+                            self._on_opportunity(opp, trade)
+                        if self._alert_service:
+                            alert = TradeAlert(
+                                strategy=opp.strategy,
+                                symbol=opp.symbol,
+                                profit_percent=opp.profit_percent,
+                                profit_usdt=trade.actual_profit_usdt or opp.profit_usdt,
+                                position_usdt=opp.position_size_usdt,
+                                details=self._build_alert_details(opp),
+                                workflow=self._build_workflow(opp),
+                                profit_last_hour=self._portfolio.profit_last_hour(),
+                                profit_last_24h=self._portfolio.profit_last_24h(),
+                                timestamp=datetime.now(),
+                                alert_type='opened',
+                            )
+                            asyncio.create_task(self._alert_service.send_trade_alert(alert))
 
         except Exception as e:
             msg = f'Bot cycle error: {e}'

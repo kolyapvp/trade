@@ -262,5 +262,7 @@ class ArbitrageDetector:
                 funding_rate=futures_ticker.funding_rate,
                 basis=result['basis'],
                 basis_percent=result['basis_percent'],
+                spot_taker_fee=spot_fee.taker,
+                futures_taker_fee=futures_fee.taker,
             ),
         )

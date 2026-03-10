@@ -9,7 +9,7 @@ from rich.text import Text
 from rich.panel import Panel
 from rich.columns import Columns
 
-from ..domain.entities import ArbitrageOpportunity, VirtualTrade, CrossExchangeDetails, TriangularDetails, FuturesSpotDetails
+from ..domain.entities import ArbitrageOpportunity, VirtualTrade, CrossExchangeDetails, TriangularDetails, FuturesSpotDetails, FuturesSpotPosition
 from ..application.bot_service import BotStats
 from ..application.use_cases import SessionStats
 
@@ -51,6 +51,7 @@ class Dashboard:
         console.print(
             f'  Возможностей: [yellow]{stats.total_opportunities_found}[/yellow]  |  '
             f'Сделок: [green]{stats.total_trades_executed}[/green]  |  '
+            f'Откр. позиций: [cyan]{stats.open_positions_count}[/cyan]  |  '
             f'Прибыль 1ч: [bold green]+${profit_hour:.4f}[/bold green]  |  '
             f'Прибыль 24ч: [bold green]+${profit_24h:.4f}[/bold green]'
         )
@@ -99,6 +100,20 @@ class Dashboard:
         console.print(
             f'  [dim]Позиция: ${opp.position_size_usdt:.0f} | '
             f'[green]Виртуальная прибыль: +${actual:.4f}[/green][/dim]'
+        )
+
+    def print_position_closed(self, pos: FuturesSpotPosition, trade: VirtualTrade) -> None:
+        profit = trade.actual_profit_usdt or 0
+        profit_style = 'bold green' if profit >= 0 else 'bold red'
+        profit_sign = '+' if profit >= 0 else ''
+        h = int(pos.hours_open())
+        m = int((pos.hours_open() - h) * 60)
+        console.print()
+        console.print(
+            f'[bold white]◈ [ЗАКРЫТА][/bold white] '
+            f'[white]{pos.symbol}[/white]  '
+            f'[{profit_style}]{profit_sign}${profit:.4f}[/{profit_style}]  '
+            f'[dim]держалась {h}ч {m}мин | {pos.close_reason}[/dim]'
         )
 
     def print_scan_result(self, opportunities: list[ArbitrageOpportunity], duration_ms: int) -> None:

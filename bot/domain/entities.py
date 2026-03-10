@@ -37,9 +37,70 @@ class FuturesSpotDetails:
     funding_rate: float
     basis: float
     basis_percent: float
+    spot_taker_fee: float = 0.0
+    futures_taker_fee: float = 0.0
 
 
 StrategyDetails = Union[CrossExchangeDetails, TriangularDetails, FuturesSpotDetails]
+
+
+class FuturesSpotPosition:
+    CLOSE_THRESHOLD_PERCENT = 0.05
+    MAX_HOLD_HOURS = 48
+
+    def __init__(
+        self,
+        symbol: str,
+        spot_exchange: str,
+        futures_exchange: str,
+        entry_spot_price: float,
+        entry_futures_price: float,
+        entry_basis_percent: float,
+        funding_rate: float,
+        position_usdt: float,
+        spot_taker_fee: float,
+        futures_taker_fee: float,
+    ):
+        self.id = f'pos-{symbol}-{int(datetime.now().timestamp() * 1000)}'
+        self.symbol = symbol
+        self.spot_exchange = spot_exchange
+        self.futures_exchange = futures_exchange
+        self.entry_spot_price = entry_spot_price
+        self.entry_futures_price = entry_futures_price
+        self.entry_basis_percent = entry_basis_percent
+        self.funding_rate = funding_rate
+        self.position_usdt = position_usdt
+        self.spot_taker_fee = spot_taker_fee
+        self.futures_taker_fee = futures_taker_fee
+        self.opened_at = datetime.now()
+        self.status = 'open'
+        self.exit_spot_price: float = 0.0
+        self.exit_futures_price: float = 0.0
+        self.exit_basis_percent: float = 0.0
+        self.actual_profit_usdt: Optional[float] = None
+        self.closed_at: Optional[datetime] = None
+        self.close_reason: str = ''
+
+    def close(self, exit_spot: float, exit_futures: float, reason: str) -> float:
+        qty = self.position_usdt / self.entry_spot_price
+        spot_pnl = qty * (exit_spot - self.entry_spot_price)
+        futures_pnl = qty * (self.entry_futures_price - exit_futures)
+        hours_held = (datetime.now() - self.opened_at).total_seconds() / 3600
+        funding_periods = max(1, int(hours_held / 8))
+        funding_income = self.position_usdt * self.funding_rate * funding_periods
+        total_fees = (self.spot_taker_fee + self.futures_taker_fee) * self.position_usdt * 2
+        profit = spot_pnl + futures_pnl + funding_income - total_fees
+        self.exit_spot_price = exit_spot
+        self.exit_futures_price = exit_futures
+        self.exit_basis_percent = ((exit_futures - exit_spot) / exit_spot * 100) if exit_spot > 0 else 0.0
+        self.actual_profit_usdt = profit
+        self.status = 'closed'
+        self.closed_at = datetime.now()
+        self.close_reason = reason
+        return profit
+
+    def hours_open(self) -> float:
+        return (datetime.now() - self.opened_at).total_seconds() / 3600
 ArbitrageStrategy = str
 
 

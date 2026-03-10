@@ -5,7 +5,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
-from ..domain.entities import ArbitrageOpportunity, VirtualTrade, Portfolio
+from ..domain.entities import (
+    ArbitrageOpportunity, VirtualTrade, Portfolio,
+    FuturesSpotPosition, FuturesSpotDetails,
+)
 from ..domain.ports import IExchange, ITradeRepository, Ticker, FuturesTicker
 from ..domain.services import ArbitrageDetector
 from ..domain.value_objects import OrderBook
@@ -36,6 +39,9 @@ class ScanResult:
     scanned_at: datetime
     duration_ms: int
     errors: list[str]
+    spot_prices: dict[str, dict[str, float]] = field(default_factory=dict)
+    futures_prices: dict[str, dict[str, float]] = field(default_factory=dict)
+    futures_funding: dict[str, dict[str, float]] = field(default_factory=dict)
 
 
 class ScanOpportunitiesUseCase:
@@ -77,6 +83,11 @@ class ScanOpportunitiesUseCase:
 
         await asyncio.gather(*[load_exchange(ex) for ex in self._spot], return_exceptions=True)
 
+        spot_prices: dict[str, dict[str, float]] = {
+            d['exchange_id']: {s: t.last for s, t in d['tickers'].items()}
+            for d in exchange_data
+        }
+
         if cfg.enable_cross_exchange and len(exchange_data) >= 2:
             for symbol in cfg.symbols:
                 found = self._detector.detect_cross_exchange(
@@ -100,6 +111,9 @@ class ScanOpportunitiesUseCase:
                 )
                 opportunities.extend(found)
 
+        futures_prices: dict[str, dict[str, float]] = {}
+        futures_funding: dict[str, dict[str, float]] = {}
+
         if cfg.enable_futures_spot and self._futures:
             futures_tickers_cache: dict[str, dict[str, FuturesTicker]] = {}
             for futures_ex in self._futures:
@@ -113,6 +127,8 @@ class ScanOpportunitiesUseCase:
                         errors.append(f'futures {futures_ex.info.id} {symbol}: {e}')
                 if cache:
                     futures_tickers_cache[futures_ex.info.id] = cache
+                    futures_prices[futures_ex.info.id] = {s: ft.last for s, ft in cache.items()}
+                    futures_funding[futures_ex.info.id] = {s: ft.funding_rate for s, ft in cache.items()}
 
             best_per_symbol: dict[str, ArbitrageOpportunity] = {}
 
@@ -159,6 +175,9 @@ class ScanOpportunitiesUseCase:
             scanned_at=datetime.now(),
             duration_ms=duration,
             errors=errors,
+            spot_prices=spot_prices,
+            futures_prices=futures_prices,
+            futures_funding=futures_funding,
         )
 
 
@@ -186,6 +205,96 @@ class ExecuteDemoTradeUseCase:
         return trade
 
 
+class FuturesSpotPositionManager:
+    def __init__(self, repository: ITradeRepository, portfolio: Portfolio):
+        self._repo = repository
+        self._portfolio = portfolio
+        self._positions: dict[str, FuturesSpotPosition] = {}
+
+    def has_open_position(self, symbol: str) -> bool:
+        return symbol in self._positions
+
+    def open_position(self, opp: ArbitrageOpportunity) -> FuturesSpotPosition:
+        d = opp.details
+        assert isinstance(d, FuturesSpotDetails)
+        pos = FuturesSpotPosition(
+            symbol=opp.symbol,
+            spot_exchange=d.spot_exchange,
+            futures_exchange=d.futures_exchange,
+            entry_spot_price=d.spot_price,
+            entry_futures_price=d.futures_price,
+            entry_basis_percent=d.basis_percent,
+            funding_rate=d.funding_rate,
+            position_usdt=opp.position_size_usdt,
+            spot_taker_fee=d.spot_taker_fee,
+            futures_taker_fee=d.futures_taker_fee,
+        )
+        self._positions[opp.symbol] = pos
+        return pos
+
+    async def check_and_close(
+        self,
+        spot_prices: dict[str, dict[str, float]],
+        futures_prices: dict[str, dict[str, float]],
+    ) -> list[tuple[FuturesSpotPosition, VirtualTrade]]:
+        results = []
+        for symbol, pos in list(self._positions.items()):
+            current_spot = spot_prices.get(pos.spot_exchange, {}).get(symbol)
+            current_futures = futures_prices.get(pos.futures_exchange, {}).get(symbol)
+            if current_spot is None or current_futures is None:
+                continue
+
+            current_basis_pct = (
+                (current_futures - current_spot) / current_spot * 100
+            ) if current_spot > 0 else 999.0
+
+            reason: Optional[str] = None
+            if abs(current_basis_pct) < FuturesSpotPosition.CLOSE_THRESHOLD_PERCENT:
+                reason = f'Базис сошёлся к {current_basis_pct:.4f}%'
+            elif pos.hours_open() >= FuturesSpotPosition.MAX_HOLD_HOURS:
+                reason = f'Таймаут {FuturesSpotPosition.MAX_HOLD_HOURS}ч'
+
+            if reason:
+                pos.close(current_spot, current_futures, reason)
+                del self._positions[symbol]
+
+                entry_qty = pos.position_usdt / pos.entry_spot_price
+                entry_basis_profit = entry_qty * abs(pos.entry_futures_price - pos.entry_spot_price)
+                entry_fees = (pos.spot_taker_fee + pos.futures_taker_fee) * pos.position_usdt * 2
+                expected_profit = entry_basis_profit + pos.position_usdt * pos.funding_rate - entry_fees
+                expected_pct = (expected_profit / pos.position_usdt * 100) if pos.position_usdt > 0 else 0.0
+
+                trade = VirtualTrade(
+                    strategy='futures_spot',
+                    symbol=pos.symbol,
+                    position_size_usdt=pos.position_usdt,
+                    expected_profit_usdt=expected_profit,
+                    expected_profit_percent=expected_pct,
+                    details=FuturesSpotDetails(
+                        spot_exchange=pos.spot_exchange,
+                        futures_exchange=pos.futures_exchange,
+                        symbol=pos.symbol,
+                        spot_price=pos.exit_spot_price,
+                        futures_price=pos.exit_futures_price,
+                        funding_rate=pos.funding_rate,
+                        basis=pos.exit_futures_price - pos.exit_spot_price,
+                        basis_percent=pos.exit_basis_percent,
+                        spot_taker_fee=pos.spot_taker_fee,
+                        futures_taker_fee=pos.futures_taker_fee,
+                    ),
+                )
+                trade.close(pos.actual_profit_usdt or 0.0, reason)
+                self._portfolio.add_trade(trade)
+                await self._repo.save(trade)
+                results.append((pos, trade))
+
+        return results
+
+    @property
+    def open_positions(self) -> list[FuturesSpotPosition]:
+        return list(self._positions.values())
+
+
 @dataclass
 class SessionStats:
     total_trades: int
@@ -202,12 +311,17 @@ class SessionStats:
     by_strategy: dict[str, dict]
     best_trade: Optional[dict]
     worst_trade: Optional[dict]
+    open_positions_count: int = 0
 
 
 class GenerateReportUseCase:
     def __init__(self, repository: ITradeRepository, portfolio: Portfolio):
         self._repo = repository
         self._portfolio = portfolio
+        self._position_manager: Optional[FuturesSpotPositionManager] = None
+
+    def set_position_manager(self, pm: FuturesSpotPositionManager) -> None:
+        self._position_manager = pm
 
     async def execute(self) -> SessionStats:
         closed = self._portfolio.closed_trades
@@ -217,6 +331,8 @@ class GenerateReportUseCase:
             worst_t = min(closed, key=lambda t: t.actual_profit_usdt or 0)
             best = {'symbol': best_t.symbol, 'profit': best_t.actual_profit_usdt or 0, 'strategy': best_t.strategy}
             worst = {'symbol': worst_t.symbol, 'profit': worst_t.actual_profit_usdt or 0, 'strategy': worst_t.strategy}
+
+        open_count = len(self._position_manager.open_positions) if self._position_manager else 0
 
         return SessionStats(
             total_trades=self._portfolio.total_trades,
@@ -233,4 +349,5 @@ class GenerateReportUseCase:
             by_strategy=self._portfolio.get_stats_by_strategy(),
             best_trade=best,
             worst_trade=worst,
+            open_positions_count=open_count,
         )
