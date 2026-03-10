@@ -1,26 +1,16 @@
-FROM node:20-alpine AS builder
+FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY package*.json ./
-RUN npm ci
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-COPY tsconfig.json ./
-COPY src ./src
-
-RUN npm run build
-
-FROM node:20-alpine
-
-WORKDIR /app
-
-COPY package*.json ./
-RUN npm ci --omit=dev
-
-COPY --from=builder /app/dist ./dist
+COPY bot/ ./bot/
+COPY main.py .
 
 RUN mkdir -p /app/data
 
 ENV LOG_FILE=/app/data/trades.json
+ENV PYTHONUNBUFFERED=1
 
-CMD ["node", "dist/index.js"]
+CMD ["python", "main.py"]

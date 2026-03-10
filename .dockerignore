@@ -1,7 +1,12 @@
-node_modules
-dist
-data
-*.md
-.git
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+data/
+*.log
 .env
 .env.*
+.git
+node_modules/
+dist/
+src/

@@ -1,5 +1,14 @@
-node_modules/
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
 dist/
+build/
+*.egg-info/
 .env
+data/
 trades.json
 *.log
+
+node_modules/

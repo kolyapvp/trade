@@ -1,0 +1,125 @@
+from __future__ import annotations
+
+from typing import Optional
+
+import ccxt.async_support as ccxt
+
+from ..domain.ports import IExchange, ExchangeInfo, Ticker, FuturesTicker
+from ..domain.value_objects import Fee, OrderBook, OrderBookLevel
+
+
+class CcxtExchangeAdapter(IExchange):
+    def __init__(
+        self,
+        exchange: ccxt.Exchange,
+        fee: Fee,
+        supports_futures: bool = False,
+    ):
+        self._exchange = exchange
+        self.info = ExchangeInfo(
+            id=exchange.id,
+            name=getattr(exchange, 'name', exchange.id),
+            fee=fee,
+            supports_spot=True,
+            supports_futures=supports_futures,
+        )
+
+    async def fetch_order_book(self, symbol: str, limit: int = 20) -> OrderBook:
+        raw = await self._exchange.fetch_order_book(symbol, limit)
+        bids = [OrderBookLevel(price=b[0], quantity=b[1]) for b in (raw.get('bids') or [])]
+        asks = [OrderBookLevel(price=a[0], quantity=a[1]) for a in (raw.get('asks') or [])]
+        return OrderBook(
+            symbol=symbol,
+            exchange_id=self._exchange.id,
+            bids=bids,
+            asks=asks,
+            timestamp=raw.get('timestamp') or 0,
+        )
+
+    async def fetch_ticker(self, symbol: str) -> Ticker:
+        raw = await self._exchange.fetch_ticker(symbol)
+        return Ticker(
+            symbol=symbol,
+            exchange_id=self._exchange.id,
+            bid=raw.get('bid') or 0.0,
+            ask=raw.get('ask') or 0.0,
+            last=raw.get('last') or 0.0,
+            volume=raw.get('baseVolume') or 0.0,
+            timestamp=raw.get('timestamp') or 0,
+        )
+
+    async def fetch_tickers(self, symbols: list[str]) -> list[Ticker]:
+        result: list[Ticker] = []
+        if self._exchange.has.get('fetchTickers'):
+            try:
+                raw = await self._exchange.fetch_tickers(symbols)
+                for symbol in symbols:
+                    t = raw.get(symbol)
+                    if t:
+                        result.append(Ticker(
+                            symbol=symbol,
+                            exchange_id=self._exchange.id,
+                            bid=t.get('bid') or 0.0,
+                            ask=t.get('ask') or 0.0,
+                            last=t.get('last') or 0.0,
+                            volume=t.get('baseVolume') or 0.0,
+                            timestamp=t.get('timestamp') or 0,
+                        ))
+                return result
+            except Exception:
+                pass
+
+        for symbol in symbols:
+            try:
+                result.append(await self.fetch_ticker(symbol))
+            except Exception:
+                pass
+        return result
+
+    async def fetch_futures_ticker(self, symbol: str) -> Optional[FuturesTicker]:
+        if not self.info.supports_futures:
+            return None
+        try:
+            raw = await self._exchange.fetch_ticker(symbol)
+            funding = None
+            try:
+                funding = await self._exchange.fetch_funding_rate(symbol)
+            except Exception:
+                pass
+
+            funding_rate = 0.0
+            next_funding = 0
+            if funding:
+                funding_rate = funding.get('fundingRate') or 0.0
+                next_funding = funding.get('nextFundingDatetime') or 0
+
+            info = raw.get('info') or {}
+            return FuturesTicker(
+                symbol=symbol,
+                exchange_id=self._exchange.id,
+                bid=raw.get('bid') or 0.0,
+                ask=raw.get('ask') or 0.0,
+                last=raw.get('last') or 0.0,
+                volume=raw.get('baseVolume') or 0.0,
+                timestamp=raw.get('timestamp') or 0,
+                funding_rate=funding_rate,
+                next_funding_time=next_funding,
+                mark_price=float(info.get('markPrice') or raw.get('last') or 0),
+                index_price=float(info.get('indexPrice') or raw.get('last') or 0),
+            )
+        except Exception:
+            return None
+
+    async def is_available(self) -> bool:
+        try:
+            await self._exchange.fetch_status()
+            return True
+        except Exception:
+            try:
+                await self._exchange.fetch_time()
+                return True
+            except Exception:
+                return False
+
+    async def close(self) -> None:
+        await self._exchange.close()
