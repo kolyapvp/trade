@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, Optional
 
 from .use_cases import ScanOpportunitiesUseCase, ExecuteDemoTradeUseCase, GenerateReportUseCase, ScanConfig
@@ -47,6 +47,7 @@ class ArbitrageBotService:
         self._on_opportunity: Optional[Callable] = None
         self._on_scan: Optional[Callable] = None
         self._on_error: Optional[Callable] = None
+        self._futures_spot_cooldown: dict[str, datetime] = {}
 
     def set_opportunity_handler(self, handler: Callable) -> None:
         self._on_opportunity = handler
@@ -173,6 +174,13 @@ class ArbitrageBotService:
             for opp in result.opportunities:
                 if not opp.is_profitable(self._scan_config.min_profit_percent):
                     continue
+
+                if opp.strategy == 'futures_spot':
+                    cooldown_until = self._futures_spot_cooldown.get(opp.symbol)
+                    if cooldown_until and datetime.now() < cooldown_until:
+                        continue
+                    self._futures_spot_cooldown[opp.symbol] = datetime.now() + timedelta(hours=4)
+
                 if self._mode == 'demo':
                     trade = await self._executor.execute(opp)
                     self._stats.total_trades_executed += 1

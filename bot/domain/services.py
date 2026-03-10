@@ -87,9 +87,9 @@ class ProfitCalculator:
         spot_fee_usdt = spot_fee.calculate(position_usdt)
         futures_fee_usdt = futures_fee.calculate(position_usdt)
 
-        funding_income = position_usdt * abs(funding_rate)
+        funding_income = position_usdt * funding_rate
         basis_profit = qty * abs(basis)
-        total_fees = spot_fee_usdt + futures_fee_usdt
+        total_fees = (spot_fee_usdt + futures_fee_usdt) * 2
 
         profit_usdt = basis_profit + funding_income - total_fees
         profit_percent = (profit_usdt / position_usdt * 100) if position_usdt > 0 else 0.0
