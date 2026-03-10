@@ -220,11 +220,13 @@ class ArbitrageDetector:
 
     def detect_futures_spot(
         self,
-        exchange_id: str,
+        spot_exchange_id: str,
+        futures_exchange_id: str,
         symbol: str,
         spot_ticker: Ticker,
         futures_ticker: FuturesTicker,
-        fee: 'Fee',
+        spot_fee: 'Fee',
+        futures_fee: 'Fee',
         position_usdt: float,
         min_profit_percent: float,
         long_only: bool = True,
@@ -234,8 +236,8 @@ class ArbitrageDetector:
             futures_ticker.last,
             futures_ticker.funding_rate,
             position_usdt,
-            fee,
-            fee,
+            spot_fee,
+            futures_fee,
         )
 
         basis = result['basis']
@@ -252,7 +254,8 @@ class ArbitrageDetector:
             profit_percent=result['profit_percent'],
             position_size_usdt=position_usdt,
             details=FuturesSpotDetails(
-                exchange=exchange_id,
+                spot_exchange=spot_exchange_id,
+                futures_exchange=futures_exchange_id,
                 symbol=symbol,
                 spot_price=spot_ticker.last,
                 futures_price=futures_ticker.last,

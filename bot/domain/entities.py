@@ -29,7 +29,8 @@ class TriangularDetails:
 
 @dataclass
 class FuturesSpotDetails:
-    exchange: str
+    spot_exchange: str
+    futures_exchange: str
     symbol: str
     spot_price: float
     futures_price: float

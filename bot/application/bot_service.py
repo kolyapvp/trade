@@ -132,26 +132,25 @@ class ArbitrageBotService:
         coin = d.symbol.split('/')[0]
         rate_pct = d.funding_rate * 100
         rate_sign = '+' if rate_pct >= 0 else ''
+        cross_label = ' 🔀 <b>кросс-биржа</b>' if d.spot_exchange != d.futures_exchange else ''
 
         if d.basis < 0:
-            direction = 'Обратный кэш-энд-кэрри'
             who_receives = 'лонги получают' if rate_pct < 0 else 'шорты получают'
             return [
-                f'📌 <b>{direction}</b> (фьюч дешевле спота)',
-                f'1️⃣ Продать спот <b>{coin}</b> по <b>${d.spot_price:.4f}</b>',
-                f'2️⃣ Купить фьюч <b>{coin} LONG</b> по <b>${d.futures_price:.4f}</b>',
+                f'📌 <b>Обратный кэш-энд-кэрри</b> (фьюч дешевле спота){cross_label}',
+                f'1️⃣ Продать спот <b>{coin}</b> на <b>{d.spot_exchange}</b> по ${d.spot_price:.4f}',
+                f'2️⃣ Купить фьюч <b>{coin} LONG</b> на <b>{d.futures_exchange}</b> по ${d.futures_price:.4f}',
                 f'3️⃣ Ставка фин-я: {rate_sign}{rate_pct:.4f}%/8ч → <b>{who_receives}</b>',
                 f'4️⃣ Закрыть обе позиции при схождении базиса к 0',
             ]
         else:
-            direction = 'Кэш-энд-кэрри'
             who_receives = 'шорты получают' if rate_pct > 0 else 'лонги получают'
             return [
-                f'📌 <b>{direction}</b> (фьюч дороже спота)',
-                f'1️⃣ Купить спот <b>{coin}</b> по <b>${d.spot_price:.4f}</b>',
-                f'2️⃣ Открыть фьюч <b>{coin} SHORT</b> по <b>${d.futures_price:.4f}</b>',
+                f'📌 <b>Кэш-энд-кэрри</b> (фьюч дороже спота){cross_label}',
+                f'1️⃣ Купить спот <b>{coin}</b> на <b>{d.spot_exchange}</b> по ${d.spot_price:.4f}',
+                f'2️⃣ Открыть фьюч <b>{coin} SHORT</b> на <b>{d.futures_exchange}</b> по ${d.futures_price:.4f}',
                 f'3️⃣ Ставка фин-я: {rate_sign}{rate_pct:.4f}%/8ч → <b>{who_receives}</b>',
-                f'4️⃣ Закрыть обе позиции при схождении базиса к 0',
+                f'4️⃣ Закрыть позиции при схождении базиса к 0',
             ]
 
     async def _run_cycle(self) -> None:

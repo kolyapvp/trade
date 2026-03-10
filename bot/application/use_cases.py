@@ -6,10 +6,9 @@ from datetime import datetime
 from typing import Optional
 
 from ..domain.entities import ArbitrageOpportunity, VirtualTrade, Portfolio
-from ..domain.ports import IExchange, ITradeRepository
+from ..domain.ports import IExchange, ITradeRepository, Ticker, FuturesTicker
 from ..domain.services import ArbitrageDetector
 from ..domain.value_objects import OrderBook
-from ..domain.ports import Ticker
 
 
 @dataclass
@@ -102,31 +101,55 @@ class ScanOpportunitiesUseCase:
                 opportunities.extend(found)
 
         if cfg.enable_futures_spot and self._futures:
+            futures_tickers_cache: dict[str, dict[str, FuturesTicker]] = {}
+            for futures_ex in self._futures:
+                cache: dict[str, FuturesTicker] = {}
+                for symbol in cfg.symbols:
+                    try:
+                        ft = await futures_ex.fetch_futures_ticker(symbol)
+                        if ft:
+                            cache[symbol] = ft
+                    except Exception as e:
+                        errors.append(f'futures {futures_ex.info.id} {symbol}: {e}')
+                if cache:
+                    futures_tickers_cache[futures_ex.info.id] = cache
+
+            best_per_symbol: dict[str, ArbitrageOpportunity] = {}
+
             for spot_ex in self._spot:
                 spot_data = next((d for d in exchange_data if d['exchange_id'] == spot_ex.info.id), None)
                 if not spot_data:
                     continue
-                futures_ex = next(
-                    (f for f in self._futures if spot_ex.info.id in f.info.id or f.info.id in spot_ex.info.id),
-                    None,
-                )
-                if not futures_ex:
-                    continue
 
-                for symbol in cfg.symbols:
-                    try:
+                for futures_ex in self._futures:
+                    ftickers = futures_tickers_cache.get(futures_ex.info.id, {})
+
+                    for symbol in cfg.symbols:
                         spot_ticker = spot_data['tickers'].get(symbol)
-                        futures_ticker = await futures_ex.fetch_futures_ticker(symbol)
-                        if spot_ticker and futures_ticker:
+                        futures_ticker = ftickers.get(symbol)
+                        if not spot_ticker or not futures_ticker:
+                            continue
+                        try:
                             opp = self._detector.detect_futures_spot(
-                                spot_ex.info.id, symbol, spot_ticker, futures_ticker,
-                                spot_ex.info.fee, cfg.position_size_usdt, cfg.min_profit_percent,
+                                spot_ex.info.id,
+                                futures_ex.info.id,
+                                symbol,
+                                spot_ticker,
+                                futures_ticker,
+                                spot_ex.info.fee,
+                                futures_ex.info.fee,
+                                cfg.position_size_usdt,
+                                cfg.min_profit_percent,
                                 long_only=cfg.futures_spot_long_only,
                             )
                             if opp:
-                                opportunities.append(opp)
-                    except Exception as e:
-                        errors.append(f'futures-spot {symbol}: {e}')
+                                prev = best_per_symbol.get(symbol)
+                                if prev is None or opp.profit_percent > prev.profit_percent:
+                                    best_per_symbol[symbol] = opp
+                        except Exception as e:
+                            errors.append(f'futures-spot {spot_ex.info.id}×{futures_ex.info.id} {symbol}: {e}')
+
+            opportunities.extend(best_per_symbol.values())
 
         opportunities.sort(key=lambda o: o.profit_percent, reverse=True)
 
