@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  trade-bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    environment:
+      LOG_FILE: /app/data/trades.json
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
