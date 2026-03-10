@@ -86,7 +86,7 @@ class FuturesSpotPosition:
         spot_pnl = qty * (exit_spot - self.entry_spot_price)
         futures_pnl = qty * (self.entry_futures_price - exit_futures)
         hours_held = (datetime.now() - self.opened_at).total_seconds() / 3600
-        funding_periods = max(1, int(hours_held / 8))
+        funding_periods = int(hours_held / 8)
         funding_income = self.position_usdt * self.funding_rate * funding_periods
         total_fees = (self.spot_taker_fee + self.futures_taker_fee) * self.position_usdt * 2
         profit = spot_pnl + futures_pnl + funding_income - total_fees
