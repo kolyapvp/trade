@@ -32,10 +32,10 @@ class CcxtExchangeAdapter(IExchange):
         self._markets_loaded = False
         self._markets_lock = asyncio.Lock()
         self._symbol_cache: dict[str, str] = {}
+        self._requires_market_bootstrap = exchange.id == 'gateio'
 
     async def fetch_order_book(self, symbol: str, limit: int = 20) -> OrderBook:
-        market_symbol = await self._resolve_symbol(symbol)
-        raw = await self._exchange.fetch_order_book(market_symbol, limit)
+        market_symbol, raw = await self._call_exchange_method('fetch_order_book', symbol, limit)
         bids = [OrderBookLevel(price=b[0], quantity=b[1]) for b in (raw.get('bids') or [])]
         asks = [OrderBookLevel(price=a[0], quantity=a[1]) for a in (raw.get('asks') or [])]
         return OrderBook(
@@ -47,8 +47,7 @@ class CcxtExchangeAdapter(IExchange):
         )
 
     async def fetch_ticker(self, symbol: str) -> Ticker:
-        market_symbol = await self._resolve_symbol(symbol)
-        raw = await self._exchange.fetch_ticker(market_symbol)
+        market_symbol, raw = await self._call_exchange_method('fetch_ticker', symbol)
         return Ticker(
             symbol=market_symbol,
             exchange_id=self._exchange.id,
@@ -91,8 +90,7 @@ class CcxtExchangeAdapter(IExchange):
         if not self.info.supports_futures:
             return None
         try:
-            market_symbol = await self._resolve_symbol(symbol)
-            raw = await self._exchange.fetch_ticker(market_symbol)
+            market_symbol, raw = await self._call_exchange_method('fetch_ticker', symbol)
             funding = None
             try:
                 funding = await self._exchange.fetch_funding_rate(market_symbol)
@@ -142,10 +140,32 @@ class CcxtExchangeAdapter(IExchange):
         async with self._markets_lock:
             if self._markets_loaded:
                 return
-            await self._exchange.load_markets()
+            timeout_seconds = max((self._exchange.timeout or 10000) / 1000, 10)
+            await asyncio.wait_for(self._exchange.load_markets(), timeout=timeout_seconds)
             self._markets_loaded = True
 
-    async def _resolve_symbol(self, symbol: str) -> str:
+    async def _call_exchange_method(self, method_name: str, symbol: str, *args):
+        market_symbol = await self._prepare_symbol(symbol)
+        method = getattr(self._exchange, method_name)
+        try:
+            return market_symbol, await method(market_symbol, *args)
+        except Exception as exc:
+            fallback_symbol = await self._resolve_symbol_from_exception(symbol, exc)
+            if fallback_symbol == market_symbol:
+                raise
+            return fallback_symbol, await method(fallback_symbol, *args)
+
+    async def _prepare_symbol(self, symbol: str) -> str:
+        if self._requires_market_bootstrap:
+            await self._ensure_markets_loaded()
+        return self._symbol_cache.get(symbol, symbol)
+
+    async def _resolve_symbol_from_exception(self, symbol: str, exc: Exception) -> str:
+        if not self._is_unknown_symbol_error(exc):
+            return self._symbol_cache.get(symbol, symbol)
+        return await self._resolve_alias_symbol(symbol)
+
+    async def _resolve_alias_symbol(self, symbol: str) -> str:
         cached = self._symbol_cache.get(symbol)
         if cached:
             return cached
@@ -161,3 +181,7 @@ class CcxtExchangeAdapter(IExchange):
 
         self._symbol_cache[symbol] = resolved
         return resolved
+
+    def _is_unknown_symbol_error(self, exc: Exception) -> bool:
+        message = str(exc).lower()
+        return 'does not have market symbol' in message or 'badsymbol' in message

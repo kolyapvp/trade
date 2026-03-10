@@ -46,7 +46,10 @@ class ExchangeFactory:
             **_creds(creds),
             'enableRateLimit': True,
             'timeout': 30000,
-            'options': {'defaultType': 'spot'},
+            'options': {
+                'defaultType': 'spot',
+                'fetchMarkets': {'types': ['spot']},
+            },
         })
         return CcxtExchangeAdapter(ex, Fee.gateio(), False)
 
