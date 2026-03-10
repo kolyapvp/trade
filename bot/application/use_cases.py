@@ -28,6 +28,7 @@ class ScanConfig:
     enable_cross_exchange: bool = True
     enable_triangular: bool = True
     enable_futures_spot: bool = True
+    futures_spot_long_only: bool = True
 
 
 @dataclass
@@ -120,6 +121,7 @@ class ScanOpportunitiesUseCase:
                             opp = self._detector.detect_futures_spot(
                                 spot_ex.info.id, symbol, spot_ticker, futures_ticker,
                                 spot_ex.info.fee, cfg.position_size_usdt, cfg.min_profit_percent,
+                                long_only=cfg.futures_spot_long_only,
                             )
                             if opp:
                                 opportunities.append(opp)

@@ -227,6 +227,7 @@ class ArbitrageDetector:
         fee: 'Fee',
         position_usdt: float,
         min_profit_percent: float,
+        long_only: bool = True,
     ) -> ArbitrageOpportunity | None:
         result = self._calc.calculate_futures_spot(
             spot_ticker.last,
@@ -236,6 +237,11 @@ class ArbitrageDetector:
             fee,
             fee,
         )
+
+        basis = result['basis']
+        if long_only and basis < 0:
+            return None
+
         if result['profit_percent'] < min_profit_percent:
             return None
 

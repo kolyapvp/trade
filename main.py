@@ -107,6 +107,7 @@ async def bootstrap() -> None:
         enable_cross_exchange=config.strategies.get('cross_exchange', True),
         enable_triangular=config.strategies.get('triangular', True),
         enable_futures_spot=config.strategies.get('futures_spot', True),
+        futures_spot_long_only=config.futures_spot_long_only,
     )
 
     scanner = ScanOpportunitiesUseCase(active_spot, futures_exchanges)

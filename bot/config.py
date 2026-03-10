@@ -32,6 +32,7 @@ class AppConfig:
     telegram: TelegramConfig
     pairs: list[str]
     strategies: dict[str, bool]
+    futures_spot_long_only: bool
 
 
 def _mode_from_args() -> str | None:
@@ -101,4 +102,5 @@ config = AppConfig(
         'triangular': True,
         'futures_spot': True,
     },
+    futures_spot_long_only=os.getenv('FUTURES_SPOT_LONG_ONLY', 'true').lower() != 'false',
 )
