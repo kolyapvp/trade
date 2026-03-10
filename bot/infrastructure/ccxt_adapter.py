@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Optional
 
 import ccxt.async_support as ccxt
 
 from ..domain.ports import IExchange, ExchangeInfo, Ticker, FuturesTicker
 from ..domain.value_objects import Fee, OrderBook, OrderBookLevel
+
+
+SYMBOL_ALIASES: dict[str, tuple[str, ...]] = {
+    'MATIC/USDT': ('POL/USDT',),
+}
 
 
 class CcxtExchangeAdapter(IExchange):
@@ -23,13 +29,17 @@ class CcxtExchangeAdapter(IExchange):
             supports_spot=True,
             supports_futures=supports_futures,
         )
+        self._markets_loaded = False
+        self._markets_lock = asyncio.Lock()
+        self._symbol_cache: dict[str, str] = {}
 
     async def fetch_order_book(self, symbol: str, limit: int = 20) -> OrderBook:
-        raw = await self._exchange.fetch_order_book(symbol, limit)
+        market_symbol = await self._resolve_symbol(symbol)
+        raw = await self._exchange.fetch_order_book(market_symbol, limit)
         bids = [OrderBookLevel(price=b[0], quantity=b[1]) for b in (raw.get('bids') or [])]
         asks = [OrderBookLevel(price=a[0], quantity=a[1]) for a in (raw.get('asks') or [])]
         return OrderBook(
-            symbol=symbol,
+            symbol=market_symbol,
             exchange_id=self._exchange.id,
             bids=bids,
             asks=asks,
@@ -37,9 +47,10 @@ class CcxtExchangeAdapter(IExchange):
         )
 
     async def fetch_ticker(self, symbol: str) -> Ticker:
-        raw = await self._exchange.fetch_ticker(symbol)
+        market_symbol = await self._resolve_symbol(symbol)
+        raw = await self._exchange.fetch_ticker(market_symbol)
         return Ticker(
-            symbol=symbol,
+            symbol=market_symbol,
             exchange_id=self._exchange.id,
             bid=raw.get('bid') or 0.0,
             ask=raw.get('ask') or 0.0,
@@ -80,10 +91,11 @@ class CcxtExchangeAdapter(IExchange):
         if not self.info.supports_futures:
             return None
         try:
-            raw = await self._exchange.fetch_ticker(symbol)
+            market_symbol = await self._resolve_symbol(symbol)
+            raw = await self._exchange.fetch_ticker(market_symbol)
             funding = None
             try:
-                funding = await self._exchange.fetch_funding_rate(symbol)
+                funding = await self._exchange.fetch_funding_rate(market_symbol)
             except Exception:
                 pass
 
@@ -95,7 +107,7 @@ class CcxtExchangeAdapter(IExchange):
 
             info = raw.get('info') or {}
             return FuturesTicker(
-                symbol=symbol,
+                symbol=market_symbol,
                 exchange_id=self._exchange.id,
                 bid=raw.get('bid') or 0.0,
                 ask=raw.get('ask') or 0.0,
@@ -123,3 +135,29 @@ class CcxtExchangeAdapter(IExchange):
 
     async def close(self) -> None:
         await self._exchange.close()
+
+    async def _ensure_markets_loaded(self) -> None:
+        if self._markets_loaded:
+            return
+        async with self._markets_lock:
+            if self._markets_loaded:
+                return
+            await self._exchange.load_markets()
+            self._markets_loaded = True
+
+    async def _resolve_symbol(self, symbol: str) -> str:
+        cached = self._symbol_cache.get(symbol)
+        if cached:
+            return cached
+
+        await self._ensure_markets_loaded()
+
+        resolved = symbol
+        if symbol not in self._exchange.markets:
+            for alias in SYMBOL_ALIASES.get(symbol, ()):
+                if alias in self._exchange.markets:
+                    resolved = alias
+                    break
+
+        self._symbol_cache[symbol] = resolved
+        return resolved

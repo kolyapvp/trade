@@ -98,7 +98,7 @@ config = AppConfig(
         'XRP/USDT', 'DOGE/USDT', 'ADA/USDT', 'AVAX/USDT',
         'DOT/USDT', 'LINK/USDT', 'LTC/USDT', 'ATOM/USDT',
         'TRX/USDT', 'UNI/USDT', 'APT/USDT', 'SUI/USDT',
-        'ARB/USDT', 'OP/USDT', 'MATIC/USDT', 'FIL/USDT',
+        'ARB/USDT', 'OP/USDT', 'POL/USDT', 'FIL/USDT',
         'NEAR/USDT', 'INJ/USDT',
     ],
     strategies={

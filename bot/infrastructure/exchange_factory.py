@@ -42,7 +42,12 @@ class ExchangeFactory:
         return CcxtExchangeAdapter(ex, Fee.kucoin(), False)
 
     def create_gateio(self, creds: ExchangeCredentials | None = None) -> CcxtExchangeAdapter:
-        ex = ccxt.gateio({**_creds(creds), 'enableRateLimit': True})
+        ex = ccxt.gateio({
+            **_creds(creds),
+            'enableRateLimit': True,
+            'timeout': 30000,
+            'options': {'defaultType': 'spot'},
+        })
         return CcxtExchangeAdapter(ex, Fee.gateio(), False)
 
     def create_mexc(self, creds: ExchangeCredentials | None = None) -> CcxtExchangeAdapter:
