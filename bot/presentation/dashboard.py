@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Optional
 
@@ -14,6 +15,7 @@ from ..application.bot_service import BotStats
 from ..application.use_cases import SessionStats
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 
 class Dashboard:
@@ -22,6 +24,7 @@ class Dashboard:
 
     def print_header(self, mode: str) -> None:
         console.clear()
+        logger.info('header mode=%s started_at=%s', mode, self._start_time.isoformat())
         mode_text = Text()
         if mode == 'demo':
             mode_text.append('● DEMO MODE (виртуальные сделки)', style='bold yellow')
@@ -57,6 +60,17 @@ class Dashboard:
         )
         if stats.errors:
             console.print(f'  [red][ERR] {stats.errors[-1][:100]}[/red]')
+        logger.info(
+            'stats running=%s scans=%s scan_ms=%s opportunities=%s trades=%s open_positions=%s profit_1h=%.4f profit_24h=%.4f',
+            stats.is_running,
+            stats.scan_count,
+            stats.last_scan_duration_ms,
+            stats.total_opportunities_found,
+            stats.total_trades_executed,
+            stats.open_positions_count,
+            profit_hour,
+            profit_24h,
+        )
 
     def print_opportunity(self, opp: ArbitrageOpportunity, trade: VirtualTrade) -> None:
         icons = {'cross_exchange': '⇄', 'triangular': '△', 'futures_spot': '◈'}
@@ -106,6 +120,15 @@ class Dashboard:
             console.print(
                 f'  [dim]Позиция: ${opp.position_size_usdt:.0f} | [cyan]Позиция открыта[/cyan][/dim]'
             )
+        logger.info(
+            'opportunity strategy=%s symbol=%s profit_pct=%.4f profit_usdt=%.4f position_usdt=%.2f trade_status=%s',
+            opp.strategy,
+            opp.symbol,
+            opp.profit_percent,
+            opp.profit_usdt,
+            opp.position_size_usdt,
+            trade.status if trade else 'open_position',
+        )
 
     def print_position_closed(self, pos: FuturesSpotPosition, trade: VirtualTrade) -> None:
         profit = trade.actual_profit_usdt or 0
@@ -121,6 +144,15 @@ class Dashboard:
             f'[{profit_style}]{profit_sign}${profit:.4f}[/{profit_style}]  '
             f'[dim]держалась {h}ч {m}мин | {pos.close_reason}[/dim]'
         )
+        logger.info(
+            'position_closed symbol=%s spot_exchange=%s futures_exchange=%s profit_usdt=%.4f held_minutes=%s reason=%s',
+            pos.symbol,
+            pos.spot_exchange,
+            pos.futures_exchange,
+            profit,
+            h * 60 + m,
+            pos.close_reason,
+        )
 
     def print_scan_result(self, opportunities: list[ArbitrageOpportunity], duration_ms: int) -> None:
         now = datetime.now().strftime('%H:%M:%S')
@@ -131,6 +163,7 @@ class Dashboard:
             console.print(
                 f'\n  [{now}] Найдено [yellow]{len(opportunities)}[/yellow] возможностей за {duration_ms}мс'
             )
+        logger.info('scan_result opportunities=%s duration_ms=%s', len(opportunities), duration_ms)
 
     def print_report(self, stats: SessionStats) -> None:
         console.print()
@@ -169,12 +202,24 @@ class Dashboard:
                 f'\n[green]Лучшая сделка: {stats.best_trade["symbol"]} '
                 f'+${stats.best_trade["profit"]:.4f} [{stats.best_trade["strategy"]}][/green]'
             )
+        logger.info(
+            'report total_trades=%s closed_trades=%s winning=%s losing=%s total_profit=%.4f open_positions=%s',
+            stats.total_trades,
+            stats.closed_trades,
+            stats.winning_trades,
+            stats.losing_trades,
+            stats.total_profit_usdt,
+            stats.open_positions_count,
+        )
 
     def print_error(self, msg: str) -> None:
         console.print(f'  [red][ERR] {msg[:100]}[/red]')
+        logger.error(msg)
 
     def print_info(self, msg: str) -> None:
         console.print(f'  [dim]{msg}[/dim]')
+        logger.info(msg)
 
     def print_success(self, msg: str) -> None:
         console.print(f'  [green]✓ {msg}[/green]')
+        logger.info(msg)

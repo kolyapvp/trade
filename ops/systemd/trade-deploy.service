@@ -1,0 +1,14 @@
+[Unit]
+Description=Trade Bot Deploy
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/trade
+Environment=REPO_DIR=/opt/trade
+Environment=BRANCH=main
+ExecStart=/usr/bin/env bash /opt/trade/ops/deploy.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=trade-deploy

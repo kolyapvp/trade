@@ -1,0 +1,12 @@
+[Unit]
+Description=Trade Bot Deploy Timer
+Requires=trade-deploy.service
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+Persistent=true
+Unit=trade-deploy.service
+
+[Install]
+WantedBy=timers.target

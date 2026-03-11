@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Optional
 
 from .use_cases import (
     ScanOpportunitiesUseCase, ExecuteDemoTradeUseCase,
-    GenerateReportUseCase, ScanConfig, FuturesSpotPositionManager,
+    GenerateReportUseCase, LiveExecutionError, ScanConfig, FuturesSpotPositionManager,
 )
 from ..domain.entities import ArbitrageOpportunity, VirtualTrade, Portfolio, FuturesSpotPosition
 from ..domain.entities import CrossExchangeDetails, TriangularDetails, FuturesSpotDetails
@@ -19,6 +20,8 @@ from ..domain.ports import (
     TradeAlert,
     TradeTelemetry,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -46,6 +49,8 @@ class ArbitrageBotService:
         position_manager: FuturesSpotPositionManager,
         metrics_service: IMetricsService,
         alert_service: Optional[IAlertService] = None,
+        live_spot_exchange_ids: Optional[set[str]] = None,
+        live_futures_exchange_ids: Optional[set[str]] = None,
     ):
         self._scanner = scanner
         self._executor = executor
@@ -57,6 +62,8 @@ class ArbitrageBotService:
         self._position_manager = position_manager
         self._metrics = metrics_service
         self._alert_service = alert_service
+        self._live_spot_exchange_ids = live_spot_exchange_ids or set()
+        self._live_futures_exchange_ids = live_futures_exchange_ids or set()
         self._running = False
         self._stats = BotStats()
         self._on_opportunity: Optional[Callable] = None
@@ -93,6 +100,7 @@ class ArbitrageBotService:
         self._running = True
         self._stats.is_running = True
         self._metrics.set_bot_running(True)
+        self._metrics.set_open_positions(len(self._position_manager.open_positions))
         while self._running:
             await self._run_cycle()
             if self._running:
@@ -105,6 +113,18 @@ class ArbitrageBotService:
 
     async def get_report(self):
         return await self._reporter.execute()
+
+    def _can_execute_live(self, opp: ArbitrageOpportunity) -> bool:
+        if self._mode != 'real':
+            return False
+        if opp.strategy != 'futures_spot':
+            return False
+        d = opp.details
+        assert isinstance(d, FuturesSpotDetails)
+        return (
+            d.spot_exchange in self._live_spot_exchange_ids
+            and d.futures_exchange in self._live_futures_exchange_ids
+        )
 
     def _build_signal_telemetry(self, opp: ArbitrageOpportunity) -> SignalTelemetry:
         if opp.strategy == 'cross_exchange':
@@ -294,9 +314,14 @@ class ArbitrageBotService:
             if self._on_scan:
                 self._on_scan(result.observed_opportunities, result.duration_ms)
 
-            closed_positions = await self._position_manager.check_and_close(
-                result.spot_prices, result.futures_prices
-            )
+            if self._mode == 'real':
+                closed_positions = await self._position_manager.check_and_close_live(
+                    result.spot_prices, result.futures_prices
+                )
+            else:
+                closed_positions = await self._position_manager.check_and_close(
+                    result.spot_prices, result.futures_prices
+                )
             for pos, trade in closed_positions:
                 self._stats.total_trades_executed += 1
                 self._metrics.record_trade(self._build_trade_telemetry(
@@ -348,7 +373,27 @@ class ArbitrageBotService:
                     if self._position_manager.has_open_position(opp.symbol):
                         continue
                     if self._mode == 'demo':
-                        self._position_manager.open_position(opp)
+                        await self._position_manager.open_position(opp)
+                        self._metrics.set_open_positions(len(self._position_manager.open_positions))
+                        if self._on_opportunity:
+                            self._on_opportunity(opp, None)
+                        if self._alert_service:
+                            alert = TradeAlert(
+                                strategy=opp.strategy,
+                                symbol=opp.symbol,
+                                profit_percent=opp.profit_percent,
+                                profit_usdt=opp.profit_usdt,
+                                position_usdt=opp.position_size_usdt,
+                                details=self._build_alert_details(opp),
+                                workflow=self._build_workflow(opp),
+                                profit_last_hour=self._portfolio.profit_last_hour(),
+                                profit_last_24h=self._portfolio.profit_last_24h(),
+                                timestamp=datetime.now(),
+                                alert_type='opened',
+                            )
+                            asyncio.create_task(self._alert_service.send_trade_alert(alert))
+                    elif self._can_execute_live(opp):
+                        await self._position_manager.open_live_position(opp)
                         self._metrics.set_open_positions(len(self._position_manager.open_positions))
                         if self._on_opportunity:
                             self._on_opportunity(opp, None)
@@ -398,9 +443,17 @@ class ArbitrageBotService:
                             )
                             asyncio.create_task(self._alert_service.send_trade_alert(alert))
 
+        except LiveExecutionError as e:
+            msg = f'Live execution error: {e}'
+            self._stats.errors.append(msg)
+            logger.exception(msg)
+            self._metrics.record_error('live_execution')
+            if self._on_error:
+                self._on_error(msg)
         except Exception as e:
             msg = f'Bot cycle error: {e}'
             self._stats.errors.append(msg)
+            logger.exception(msg)
             self._metrics.record_error('run_cycle')
             if self._on_error:
                 self._on_error(msg)

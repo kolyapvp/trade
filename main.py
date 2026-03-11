@@ -3,22 +3,30 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+from contextlib import suppress
 
-from bot.config import config
-from bot.domain.entities import Portfolio
-from bot.infrastructure.exchange_factory import ExchangeFactory
-from bot.infrastructure.file_repository import FileTradeRepository
-from bot.infrastructure.metrics_service import NullMetricsService, PrometheusMetricsService
-from bot.infrastructure.telegram_service import TelegramAlertService
-from bot.application.use_cases import (
-    ScanOpportunitiesUseCase,
-    ExecuteDemoTradeUseCase,
-    GenerateReportUseCase,
-    FuturesSpotPositionManager,
-    ScanConfig,
-    TriangularPathConfig,
-)
+import asyncpg
+import redis.asyncio as redis
+
 from bot.application.bot_service import ArbitrageBotService
+from bot.application.use_cases import (
+    ExecuteDemoTradeUseCase,
+    FuturesSpotPositionManager,
+    GenerateReportUseCase,
+    ScanConfig,
+    ScanOpportunitiesUseCase,
+    TriangularPathConfig,
+    build_closed_trade_analytics,
+)
+from bot.config import config
+from bot.domain.entities import Portfolio, VirtualTrade
+from bot.infrastructure.exchange_factory import ExchangeFactory
+from bot.infrastructure.logging_setup import configure_file_logging
+from bot.infrastructure.metrics_service import NullMetricsService, PrometheusMetricsService
+from bot.infrastructure.postgres_position_repository import PostgresOpenPositionSnapshotRepository
+from bot.infrastructure.postgres_trade_analytics_repository import PostgresTradeAnalyticsRepository
+from bot.infrastructure.redis_trade_repository import RedisOpenPositionStore, RedisTradeRepository
+from bot.infrastructure.telegram_service import TelegramAlertService
 from bot.presentation.dashboard import Dashboard
 
 TRIANGULAR_PATHS = [
@@ -35,7 +43,20 @@ TRIANGULAR_PATHS = [
 ]
 
 
+async def _restore_portfolio(repository: RedisTradeRepository, portfolio: Portfolio) -> int:
+    restored = 0
+    for item in await repository.get_all():
+        try:
+            portfolio.add_trade(VirtualTrade.from_dict(item))
+            restored += 1
+        except Exception:
+            continue
+    return restored
+
+
 async def bootstrap() -> None:
+    configure_file_logging(config.log_dir, config.log_retention_days)
+
     dashboard = Dashboard()
     dashboard.print_header(config.mode)
     dashboard.print_info(f'Режим: {config.mode.upper()}')
@@ -46,132 +67,221 @@ async def bootstrap() -> None:
         f'Метрики: {"включены" if config.metrics_enabled else "выключены"}'
         f'{" на порту " + str(config.metrics_port) if config.metrics_enabled else ""}'
     )
+    dashboard.print_info('Redis: configured')
+    dashboard.print_info('Postgres: configured')
+    dashboard.print_info(f'Логи: {config.log_dir} ({config.log_retention_days} дн.)')
 
-    factory = ExchangeFactory()
-    cx = config.exchanges
+    redis_client = None
+    postgres_pool = None
+    all_exchanges = []
+    try:
+        redis_client = redis.from_url(
+            config.redis_url,
+            encoding='utf-8',
+            decode_responses=True,
+            health_check_interval=30,
+        )
+        postgres_pool = await asyncpg.create_pool(
+            dsn=config.postgres_dsn,
+            min_size=1,
+            max_size=5,
+            command_timeout=30,
+        )
+        trade_repository = RedisTradeRepository(redis_client)
+        open_position_store = RedisOpenPositionStore(redis_client)
+        snapshot_repository = PostgresOpenPositionSnapshotRepository(postgres_pool)
+        analytics_repository = PostgresTradeAnalyticsRepository(postgres_pool)
+        await redis_client.ping()
+        await snapshot_repository.initialize()
+        await analytics_repository.initialize()
 
-    def has_creds(name: str) -> bool:
-        c = cx.get(name)
-        return bool(c and c.api_key and c.secret)
+        factory = ExchangeFactory()
+        cx = config.exchanges
 
-    creds_status = {name: has_creds(name) for name in cx}
-    labels = ' | '.join(f'{n}{"(api)" if v else "(pub)"}' for n, v in creds_status.items())
-    dashboard.print_info(f'Биржи: {labels}')
+        def has_private_api(name: str) -> bool:
+            credentials = cx.get(name)
+            if not credentials or not credentials.api_key or not credentials.secret:
+                return False
+            if name in {'okx', 'kucoin', 'bitget'} and not credentials.passphrase:
+                return False
+            return True
 
-    def creds_or_none(name: str):
-        return cx[name] if has_creds(name) else None
+        creds_status = {name: has_private_api(name) for name in cx}
+        labels = ' | '.join(f'{name}{"(api)" if value else "(pub)"}' for name, value in creds_status.items())
+        dashboard.print_info(f'Биржи: {labels}')
 
-    spot_exchanges = [
-        factory.create_binance_spot(creds_or_none('binance')),
-        factory.create_bybit(creds_or_none('bybit')),
-        factory.create_okx(creds_or_none('okx')),
-        factory.create_kucoin(creds_or_none('kucoin')),
-        factory.create_gateio(creds_or_none('gateio')),
-        factory.create_mexc(creds_or_none('mexc')),
-        factory.create_bitget(creds_or_none('bitget')),
-        factory.create_htx(creds_or_none('htx')),
-    ]
+        def creds_or_none(name: str):
+            return cx[name] if has_private_api(name) else None
 
-    futures_exchanges = [
-        factory.create_binance_futures(creds_or_none('binance')),
-        factory.create_bybit_futures(creds_or_none('bybit')),
-    ]
+        spot_exchanges = [
+            factory.create_binance_spot(creds_or_none('binance')),
+            factory.create_bybit(creds_or_none('bybit')),
+            factory.create_okx(creds_or_none('okx')),
+            factory.create_kucoin(creds_or_none('kucoin')),
+            factory.create_gateio(creds_or_none('gateio')),
+            factory.create_mexc(creds_or_none('mexc')),
+            factory.create_bitget(creds_or_none('bitget')),
+            factory.create_htx(creds_or_none('htx')),
+        ]
 
-    all_exchanges = spot_exchanges + futures_exchanges
+        futures_exchanges = [
+            factory.create_binance_futures(creds_or_none('binance')),
+            factory.create_bybit_futures(creds_or_none('bybit')),
+        ]
 
-    dashboard.print_info('Проверка доступности бирж...')
-    avail = await asyncio.gather(*[ex.is_available() for ex in spot_exchanges], return_exceptions=True)
+        all_exchanges = spot_exchanges + futures_exchanges
+        portfolio = Portfolio(initial_capital=10_000.0)
+        metrics_service = (
+            PrometheusMetricsService(config.metrics_port)
+            if config.metrics_enabled else NullMetricsService()
+        )
 
-    active_spot = []
-    for ex, ok in zip(spot_exchanges, avail):
-        if ok is True:
-            dashboard.print_success(f'{ex.info.id} доступен')
-            active_spot.append(ex)
+        dashboard.print_info('Проверка доступности бирж...')
+        avail = await asyncio.gather(*[ex.is_available() for ex in spot_exchanges], return_exceptions=True)
+
+        active_spot = []
+        for ex, ok in zip(spot_exchanges, avail):
+            if ok is True:
+                dashboard.print_success(f'{ex.info.id} доступен')
+                active_spot.append(ex)
+            else:
+                dashboard.print_error(f'{ex.info.id} недоступен, пропускаем')
+
+        if not active_spot:
+            dashboard.print_error('Ни одна биржа не доступна. Проверьте интернет-соединение.')
+            sys.exit(1)
+
+        live_spot_exchange_map = {
+            exchange.info.id: exchange
+            for exchange in active_spot
+            if has_private_api(exchange.info.id)
+        }
+        live_futures_exchange_map = {
+            exchange.info.id: exchange
+            for exchange in futures_exchanges
+            if has_private_api(exchange.info.id)
+        }
+        if config.mode == 'real':
+            live_spot_labels = ', '.join(sorted(live_spot_exchange_map)) or 'нет'
+            live_futures_labels = ', '.join(sorted(live_futures_exchange_map)) or 'нет'
+            dashboard.print_info(f'Live spot API: {live_spot_labels}')
+            dashboard.print_info(f'Live futures API: {live_futures_labels}')
+
+        alert_service = None
+        if config.telegram.bot_token and config.telegram.chat_id:
+            alert_service = TelegramAlertService(config.telegram.bot_token, config.telegram.chat_id)
+            dashboard.print_success('Telegram-алерты подключены')
         else:
-            dashboard.print_error(f'{ex.info.id} недоступен, пропускаем')
+            dashboard.print_info('Telegram-алерты отключены (TELEGRAM_BOT_TOKEN не задан)')
 
-    if not active_spot:
-        dashboard.print_error('Ни одна биржа не доступна. Проверьте интернет-соединение.')
-        await asyncio.gather(*[ex.close() for ex in all_exchanges], return_exceptions=True)
-        sys.exit(1)
+        restored_trades = await _restore_portfolio(trade_repository, portfolio)
+        if restored_trades:
+            dashboard.print_info(f'Из Redis восстановлено сделок: {restored_trades}')
+        backfilled_trades = await analytics_repository.backfill_closed_trades([
+            build_closed_trade_analytics(trade, config.analytics_timezone)
+            for trade in portfolio.closed_trades
+        ])
+        if backfilled_trades:
+            dashboard.print_info(f'В Postgres backfill закрытых сделок: {backfilled_trades}')
 
-    alert_service = None
-    if config.telegram.bot_token and config.telegram.chat_id:
-        alert_service = TelegramAlertService(config.telegram.bot_token, config.telegram.chat_id)
-        dashboard.print_success('Telegram-алерты подключены')
-    else:
-        dashboard.print_info('Telegram-алерты отключены (TELEGRAM_BOT_TOKEN не задан)')
+        scan_cfg = ScanConfig(
+            symbols=config.pairs,
+            position_size_usdt=config.max_position_usdt,
+            min_profit_percent=config.min_profit_percent,
+            triangular_paths=TRIANGULAR_PATHS,
+            enable_cross_exchange=config.strategies.get('cross_exchange', True),
+            enable_triangular=config.strategies.get('triangular', True),
+            enable_futures_spot=config.strategies.get('futures_spot', True),
+            futures_spot_long_only=config.futures_spot_long_only,
+        )
 
-    repository = FileTradeRepository(config.log_file)
-    portfolio = Portfolio(initial_capital=10_000.0)
-    metrics_service = (
-        PrometheusMetricsService(config.metrics_port)
-        if config.metrics_enabled else NullMetricsService()
-    )
+        scanner = ScanOpportunitiesUseCase(active_spot, futures_exchanges)
+        executor = ExecuteDemoTradeUseCase(
+            trade_repository,
+            portfolio,
+            analytics_repository,
+            config.analytics_timezone,
+        )
+        position_manager = FuturesSpotPositionManager(
+            trade_repository,
+            portfolio,
+            open_position_store,
+            snapshot_repository,
+            analytics_repository,
+            config.analytics_timezone,
+            live_spot_exchange_map,
+            live_futures_exchange_map,
+        )
+        reporter = GenerateReportUseCase(trade_repository, portfolio)
+        reporter.set_position_manager(position_manager)
 
-    scan_cfg = ScanConfig(
-        symbols=config.pairs,
-        position_size_usdt=config.max_position_usdt,
-        min_profit_percent=config.min_profit_percent,
-        triangular_paths=TRIANGULAR_PATHS,
-        enable_cross_exchange=config.strategies.get('cross_exchange', True),
-        enable_triangular=config.strategies.get('triangular', True),
-        enable_futures_spot=config.strategies.get('futures_spot', True),
-        futures_spot_long_only=config.futures_spot_long_only,
-    )
+        restored_positions = await position_manager.restore_positions(await snapshot_repository.get_all())
+        if restored_positions:
+            dashboard.print_success(f'Из Postgres восстановлено открытых позиций: {len(restored_positions)}')
 
-    scanner = ScanOpportunitiesUseCase(active_spot, futures_exchanges)
-    executor = ExecuteDemoTradeUseCase(repository, portfolio)
-    position_manager = FuturesSpotPositionManager(repository, portfolio)
-    reporter = GenerateReportUseCase(repository, portfolio)
-    reporter.set_position_manager(position_manager)
+        bot = ArbitrageBotService(
+            scanner=scanner,
+            executor=executor,
+            reporter=reporter,
+            portfolio=portfolio,
+            scan_config=scan_cfg,
+            mode=config.mode,
+            scan_interval_ms=config.scan_interval_ms,
+            position_manager=position_manager,
+            metrics_service=metrics_service,
+            alert_service=alert_service,
+            live_spot_exchange_ids=set(live_spot_exchange_map),
+            live_futures_exchange_ids=set(live_futures_exchange_map),
+        )
 
-    bot = ArbitrageBotService(
-        scanner=scanner,
-        executor=executor,
-        reporter=reporter,
-        portfolio=portfolio,
-        scan_config=scan_cfg,
-        mode=config.mode,
-        scan_interval_ms=config.scan_interval_ms,
-        position_manager=position_manager,
-        metrics_service=metrics_service,
-        alert_service=alert_service,
-    )
+        bot.set_scan_handler(lambda opps, dur: (
+            dashboard.print_bot_stats(bot.get_stats(), portfolio.profit_last_hour(), portfolio.profit_last_24h()),
+            dashboard.print_scan_result(opps, dur),
+        ))
+        bot.set_opportunity_handler(lambda opp, trade: dashboard.print_opportunity(opp, trade))
+        bot.set_position_closed_handler(lambda pos, trade: dashboard.print_position_closed(pos, trade))
+        bot.set_error_handler(lambda err: dashboard.print_error(err))
 
-    bot.set_scan_handler(lambda opps, dur: (
-        dashboard.print_bot_stats(bot.get_stats(), portfolio.profit_last_hour(), portfolio.profit_last_24h()),
-        dashboard.print_scan_result(opps, dur),
-    ))
-    bot.set_opportunity_handler(lambda opp, trade: dashboard.print_opportunity(opp, trade))
-    bot.set_position_closed_handler(lambda pos, trade: dashboard.print_position_closed(pos, trade))
-    bot.set_error_handler(lambda err: dashboard.print_error(err))
+        if config.mode == 'report':
+            report = await reporter.execute()
+            dashboard.print_report(report)
+            return
 
-    async def shutdown() -> None:
-        bot.stop()
+        shutdown_requested = asyncio.Event()
+
+        def request_shutdown() -> None:
+            if shutdown_requested.is_set():
+                return
+            shutdown_requested.set()
+            dashboard.print_info('Получен сигнал остановки, ожидаю завершение текущего цикла...')
+            bot.stop()
+
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            with suppress(NotImplementedError):
+                loop.add_signal_handler(sig, request_shutdown)
+
+        dashboard.print_success('Бот запущен. Нажмите Ctrl+C для остановки и просмотра отчёта.')
         print()
-        dashboard.print_info('Остановка бота...')
-        report = await reporter.execute()
-        dashboard.print_report(report)
+
+        bot_task = asyncio.create_task(bot.start())
+        try:
+            await bot_task
+        finally:
+            bot.stop()
+            await position_manager.flush_open_positions()
+            if shutdown_requested.is_set():
+                print()
+                dashboard.print_info('Остановка бота...')
+            report = await reporter.execute()
+            dashboard.print_report(report)
+
+    finally:
         await asyncio.gather(*[ex.close() for ex in all_exchanges], return_exceptions=True)
-
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown_and_exit()))
-
-    async def shutdown_and_exit() -> None:
-        await shutdown()
-        sys.exit(0)
-
-    if config.mode == 'report':
-        report = await reporter.execute()
-        dashboard.print_report(report)
-        await asyncio.gather(*[ex.close() for ex in all_exchanges], return_exceptions=True)
-        return
-
-    dashboard.print_success('Бот запущен. Нажмите Ctrl+C для остановки и просмотра отчёта.')
-    print()
-    await bot.start()
+        if postgres_pool is not None:
+            await postgres_pool.close()
+        if redis_client is not None:
+            await redis_client.aclose()
 
 
 if __name__ == '__main__':

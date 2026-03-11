@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from typing import Optional, Union
 
 
@@ -44,6 +44,46 @@ class FuturesSpotDetails:
 StrategyDetails = Union[CrossExchangeDetails, TriangularDetails, FuturesSpotDetails]
 
 
+@dataclass(frozen=True)
+class OpenPositionSnapshot:
+    position_id: str
+    symbol: str
+    spot_exchange: str
+    futures_exchange: str
+    entry_spot_price: float
+    entry_futures_price: float
+    entry_basis_percent: float
+    funding_rate: float
+    position_usdt: float
+    spot_taker_fee: float
+    futures_taker_fee: float
+    opened_at: datetime
+    spot_base_quantity: float = 0.0
+    futures_base_quantity: float = 0.0
+    spot_order_amount: float = 0.0
+    futures_order_amount: float = 0.0
+
+
+@dataclass(frozen=True)
+class ClosedTradeAnalytics:
+    trade_id: str
+    closed_day: date
+    strategy: str
+    route_type: str
+    symbol: str
+    position_usdt: float
+    expected_profit_usdt: float
+    expected_profit_percent: float
+    realized_profit_usdt: float
+    exchange: str = ''
+    buy_exchange: str = ''
+    sell_exchange: str = ''
+    spot_exchange: str = ''
+    futures_exchange: str = ''
+    opened_at: Optional[datetime] = None
+    closed_at: Optional[datetime] = None
+
+
 class FuturesSpotPosition:
     CLOSE_THRESHOLD_PERCENT = 0.05
     MAX_HOLD_HOURS = 48
@@ -60,8 +100,16 @@ class FuturesSpotPosition:
         position_usdt: float,
         spot_taker_fee: float,
         futures_taker_fee: float,
+        spot_base_quantity: float = 0.0,
+        futures_base_quantity: float = 0.0,
+        spot_order_amount: float = 0.0,
+        futures_order_amount: float = 0.0,
+        position_id: Optional[str] = None,
+        opened_at: Optional[datetime] = None,
     ):
-        self.id = f'pos-{symbol}-{int(datetime.now().timestamp() * 1000)}'
+        now = datetime.now()
+        implied_qty = position_usdt / entry_spot_price if entry_spot_price > 0 else 0.0
+        self.id = position_id or f'pos-{symbol}-{int(now.timestamp() * 1000)}'
         self.symbol = symbol
         self.spot_exchange = spot_exchange
         self.futures_exchange = futures_exchange
@@ -72,7 +120,11 @@ class FuturesSpotPosition:
         self.position_usdt = position_usdt
         self.spot_taker_fee = spot_taker_fee
         self.futures_taker_fee = futures_taker_fee
-        self.opened_at = datetime.now()
+        self.spot_base_quantity = spot_base_quantity or implied_qty
+        self.futures_base_quantity = futures_base_quantity or implied_qty
+        self.spot_order_amount = spot_order_amount or self.spot_base_quantity
+        self.futures_order_amount = futures_order_amount or self.futures_base_quantity
+        self.opened_at = opened_at or now
         self.status = 'open'
         self.exit_spot_price: float = 0.0
         self.exit_futures_price: float = 0.0
@@ -82,9 +134,8 @@ class FuturesSpotPosition:
         self.close_reason: str = ''
 
     def close(self, exit_spot: float, exit_futures: float, reason: str) -> float:
-        qty = self.position_usdt / self.entry_spot_price
-        spot_pnl = qty * (exit_spot - self.entry_spot_price)
-        futures_pnl = qty * (self.entry_futures_price - exit_futures)
+        spot_pnl = self.spot_base_quantity * (exit_spot - self.entry_spot_price)
+        futures_pnl = self.futures_base_quantity * (self.entry_futures_price - exit_futures)
         hours_held = (datetime.now() - self.opened_at).total_seconds() / 3600
         funding_periods = int(hours_held / 8)
         funding_income = self.position_usdt * self.funding_rate * funding_periods
@@ -101,6 +152,47 @@ class FuturesSpotPosition:
 
     def hours_open(self) -> float:
         return (datetime.now() - self.opened_at).total_seconds() / 3600
+
+    def to_snapshot(self) -> OpenPositionSnapshot:
+        return OpenPositionSnapshot(
+            position_id=self.id,
+            symbol=self.symbol,
+            spot_exchange=self.spot_exchange,
+            futures_exchange=self.futures_exchange,
+            entry_spot_price=self.entry_spot_price,
+            entry_futures_price=self.entry_futures_price,
+            entry_basis_percent=self.entry_basis_percent,
+            funding_rate=self.funding_rate,
+            position_usdt=self.position_usdt,
+            spot_taker_fee=self.spot_taker_fee,
+            futures_taker_fee=self.futures_taker_fee,
+            spot_base_quantity=self.spot_base_quantity,
+            futures_base_quantity=self.futures_base_quantity,
+            spot_order_amount=self.spot_order_amount,
+            futures_order_amount=self.futures_order_amount,
+            opened_at=self.opened_at,
+        )
+
+    @classmethod
+    def from_snapshot(cls, snapshot: OpenPositionSnapshot) -> 'FuturesSpotPosition':
+        return cls(
+            symbol=snapshot.symbol,
+            spot_exchange=snapshot.spot_exchange,
+            futures_exchange=snapshot.futures_exchange,
+            entry_spot_price=snapshot.entry_spot_price,
+            entry_futures_price=snapshot.entry_futures_price,
+            entry_basis_percent=snapshot.entry_basis_percent,
+            funding_rate=snapshot.funding_rate,
+            position_usdt=snapshot.position_usdt,
+            spot_taker_fee=snapshot.spot_taker_fee,
+            futures_taker_fee=snapshot.futures_taker_fee,
+            spot_base_quantity=snapshot.spot_base_quantity,
+            futures_base_quantity=snapshot.futures_base_quantity,
+            spot_order_amount=snapshot.spot_order_amount,
+            futures_order_amount=snapshot.futures_order_amount,
+            position_id=snapshot.position_id,
+            opened_at=snapshot.opened_at,
+        )
 ArbitrageStrategy = str
 
 
@@ -175,6 +267,27 @@ class VirtualTrade:
             'closed_at': self.closed_at.isoformat() if self.closed_at else None,
             'details': details,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'VirtualTrade':
+        trade = cls(
+            strategy=data['strategy'],
+            symbol=data['symbol'],
+            position_size_usdt=float(data['position_size_usdt']),
+            expected_profit_usdt=float(data['expected_profit_usdt']),
+            expected_profit_percent=float(data['expected_profit_percent']),
+            details=_parse_strategy_details(data['strategy'], data.get('details') or {}),
+        )
+        trade.id = data['id']
+        trade.actual_profit_usdt = (
+            float(data['actual_profit_usdt']) if data.get('actual_profit_usdt') is not None else None
+        )
+        trade.status = data.get('status', 'open')
+        trade.notes = data.get('notes')
+        trade.opened_at = datetime.fromisoformat(data['opened_at'])
+        closed_at = data.get('closed_at')
+        trade.closed_at = datetime.fromisoformat(closed_at) if closed_at else None
+        return trade
 
 
 class Portfolio:
@@ -251,3 +364,37 @@ class Portfolio:
             stats[trade.strategy]['count'] += 1
             stats[trade.strategy]['profit'] += trade.actual_profit_usdt or 0
         return stats
+
+
+def _parse_strategy_details(strategy: str, details: dict) -> StrategyDetails:
+    if strategy == 'cross_exchange':
+        return CrossExchangeDetails(
+            buy_exchange=details.get('buy_exchange', ''),
+            sell_exchange=details.get('sell_exchange', ''),
+            buy_price=float(details.get('buy_price', 0.0)),
+            sell_price=float(details.get('sell_price', 0.0)),
+            buy_fee=float(details.get('buy_fee', 0.0)),
+            sell_fee=float(details.get('sell_fee', 0.0)),
+            max_qty=float(details.get('max_qty', 0.0)),
+            symbol=details.get('symbol', ''),
+        )
+    if strategy == 'triangular':
+        return TriangularDetails(
+            exchange=details.get('exchange', ''),
+            path=list(details.get('path', [])),
+            start_amount=float(details.get('start_amount', 0.0)),
+            end_amount=float(details.get('end_amount', 0.0)),
+            fees=float(details.get('fees', 0.0)),
+        )
+    return FuturesSpotDetails(
+        spot_exchange=details.get('spot_exchange', ''),
+        futures_exchange=details.get('futures_exchange', ''),
+        symbol=details.get('symbol', ''),
+        spot_price=float(details.get('spot_price', 0.0)),
+        futures_price=float(details.get('futures_price', 0.0)),
+        funding_rate=float(details.get('funding_rate', 0.0)),
+        basis=float(details.get('basis', 0.0)),
+        basis_percent=float(details.get('basis_percent', 0.0)),
+        spot_taker_fee=float(details.get('spot_taker_fee', 0.0)),
+        futures_taker_fee=float(details.get('futures_taker_fee', 0.0)),
+    )

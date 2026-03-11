@@ -30,6 +30,11 @@ class AppConfig:
     metrics_enabled: bool
     metrics_port: int
     log_file: str
+    log_dir: str
+    log_retention_days: int
+    analytics_timezone: str
+    redis_url: str
+    postgres_dsn: str
     exchanges: dict[str, ExchangeCredentials]
     telegram: TelegramConfig
     pairs: list[str]
@@ -52,6 +57,11 @@ config = AppConfig(
     metrics_enabled=os.getenv('METRICS_ENABLED', 'true').lower() != 'false',
     metrics_port=int(os.getenv('METRICS_PORT', '9108')),
     log_file=os.getenv('LOG_FILE', 'trades.json'),
+    log_dir=os.getenv('LOG_DIR', 'logs'),
+    log_retention_days=int(os.getenv('LOG_RETENTION_DAYS', '7')),
+    analytics_timezone=os.getenv('ANALYTICS_TIMEZONE', 'Europe/Moscow'),
+    redis_url=os.getenv('REDIS_URL', 'redis://redis:6379/0'),
+    postgres_dsn=os.getenv('POSTGRES_DSN', 'postgresql://trade:trade@postgres:5432/trade'),
     exchanges={
         'binance': ExchangeCredentials(
             api_key=os.getenv('BINANCE_API_KEY', ''),

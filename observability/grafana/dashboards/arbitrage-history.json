@@ -1,0 +1,691 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "trade-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "trade-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(SUM(profit_usdt), 0) AS value\nFROM trade_daily_profit\nWHERE stat_date BETWEEN $__timeFrom()::date AND $__timeTo()::date\n  AND ('$strategy' = 'All' OR strategy = '$strategy')\n  AND ('$route_type' = 'All' OR route_type = '$route_type')\n  AND ('$symbol' = 'All' OR symbol = '$symbol')\n  AND (\n    '$exchange_filter' = 'All'\n    OR exchange = '$exchange_filter'\n    OR buy_exchange = '$exchange_filter'\n    OR sell_exchange = '$exchange_filter'\n    OR spot_exchange = '$exchange_filter'\n    OR futures_exchange = '$exchange_filter'\n  )",
+          "refId": "A"
+        }
+      ],
+      "title": "P&L In Range",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "trade-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "trade-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(SUM(profit_usdt), 0) AS value\nFROM trade_daily_profit\nWHERE stat_date >= (CURRENT_DATE - INTERVAL '6 days')::date\n  AND stat_date <= CURRENT_DATE\n  AND ('$strategy' = 'All' OR strategy = '$strategy')\n  AND ('$route_type' = 'All' OR route_type = '$route_type')\n  AND ('$symbol' = 'All' OR symbol = '$symbol')\n  AND (\n    '$exchange_filter' = 'All'\n    OR exchange = '$exchange_filter'\n    OR buy_exchange = '$exchange_filter'\n    OR sell_exchange = '$exchange_filter'\n    OR spot_exchange = '$exchange_filter'\n    OR futures_exchange = '$exchange_filter'\n  )",
+          "refId": "A"
+        }
+      ],
+      "title": "P&L Last 7 Days",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "trade-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "trade-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(SUM(trades_count), 0) AS value\nFROM trade_daily_profit\nWHERE stat_date BETWEEN $__timeFrom()::date AND $__timeTo()::date\n  AND ('$strategy' = 'All' OR strategy = '$strategy')\n  AND ('$route_type' = 'All' OR route_type = '$route_type')\n  AND ('$symbol' = 'All' OR symbol = '$symbol')\n  AND (\n    '$exchange_filter' = 'All'\n    OR exchange = '$exchange_filter'\n    OR buy_exchange = '$exchange_filter'\n    OR sell_exchange = '$exchange_filter'\n    OR spot_exchange = '$exchange_filter'\n    OR futures_exchange = '$exchange_filter'\n  )",
+          "refId": "A"
+        }
+      ],
+      "title": "Trades In Range",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "trade-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "trade-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT CASE WHEN SUM(trades_count) = 0 THEN 0 ELSE SUM(win_count)::double precision / SUM(trades_count) END AS value\nFROM trade_daily_profit\nWHERE stat_date BETWEEN $__timeFrom()::date AND $__timeTo()::date\n  AND ('$strategy' = 'All' OR strategy = '$strategy')\n  AND ('$route_type' = 'All' OR route_type = '$route_type')\n  AND ('$symbol' = 'All' OR symbol = '$symbol')\n  AND (\n    '$exchange_filter' = 'All'\n    OR exchange = '$exchange_filter'\n    OR buy_exchange = '$exchange_filter'\n    OR sell_exchange = '$exchange_filter'\n    OR spot_exchange = '$exchange_filter'\n    OR futures_exchange = '$exchange_filter'\n  )",
+          "refId": "A"
+        }
+      ],
+      "title": "Win Rate In Range",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "trade-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "id": 5,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "trade-postgres"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT stat_date::timestamp AS time, SUM(profit_usdt) AS \"Daily P&L\"\nFROM trade_daily_profit\nWHERE stat_date BETWEEN $__timeFrom()::date AND $__timeTo()::date\n  AND ('$strategy' = 'All' OR strategy = '$strategy')\n  AND ('$route_type' = 'All' OR route_type = '$route_type')\n  AND ('$symbol' = 'All' OR symbol = '$symbol')\n  AND (\n    '$exchange_filter' = 'All'\n    OR exchange = '$exchange_filter'\n    OR buy_exchange = '$exchange_filter'\n    OR sell_exchange = '$exchange_filter'\n    OR spot_exchange = '$exchange_filter'\n    OR futures_exchange = '$exchange_filter'\n  )\nGROUP BY 1\nORDER BY 1",
+          "refId": "A"
+        }
+      ],
+      "title": "Daily P&L",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "trade-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "profit_usdt"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "trades_count"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "win_count"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "loss_count"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "id": 6,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "trade-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT stat_date,\n       SUM(profit_usdt) AS profit_usdt,\n       SUM(trades_count) AS trades_count,\n       SUM(win_count) AS win_count,\n       SUM(loss_count) AS loss_count\nFROM trade_daily_profit\nWHERE stat_date BETWEEN $__timeFrom()::date AND $__timeTo()::date\n  AND ('$strategy' = 'All' OR strategy = '$strategy')\n  AND ('$route_type' = 'All' OR route_type = '$route_type')\n  AND ('$symbol' = 'All' OR symbol = '$symbol')\n  AND (\n    '$exchange_filter' = 'All'\n    OR exchange = '$exchange_filter'\n    OR buy_exchange = '$exchange_filter'\n    OR sell_exchange = '$exchange_filter'\n    OR spot_exchange = '$exchange_filter'\n    OR futures_exchange = '$exchange_filter'\n  )\nGROUP BY stat_date\nORDER BY stat_date DESC",
+          "refId": "A"
+        }
+      ],
+      "title": "Daily Breakdown",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "trade-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "profit_usdt"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "trades_count"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "id": 7,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "trade-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT symbol,\n       SUM(profit_usdt) AS profit_usdt,\n       SUM(trades_count) AS trades_count\nFROM trade_daily_profit\nWHERE stat_date BETWEEN $__timeFrom()::date AND $__timeTo()::date\n  AND ('$strategy' = 'All' OR strategy = '$strategy')\n  AND ('$route_type' = 'All' OR route_type = '$route_type')\n  AND ('$symbol' = 'All' OR symbol = '$symbol')\n  AND (\n    '$exchange_filter' = 'All'\n    OR exchange = '$exchange_filter'\n    OR buy_exchange = '$exchange_filter'\n    OR sell_exchange = '$exchange_filter'\n    OR spot_exchange = '$exchange_filter'\n    OR futures_exchange = '$exchange_filter'\n  )\nGROUP BY symbol\nORDER BY profit_usdt DESC\nLIMIT 20",
+          "refId": "A"
+        }
+      ],
+      "title": "Top Symbols",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "postgres",
+        "uid": "trade-postgres"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "profit_usdt"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "trades_count"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "id": 8,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "postgres",
+            "uid": "trade-postgres"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT CASE\n         WHEN strategy = 'triangular' THEN exchange\n         WHEN strategy = 'cross_exchange' THEN buy_exchange || ' -> ' || sell_exchange\n         ELSE spot_exchange || ' -> ' || futures_exchange\n       END AS route,\n       SUM(profit_usdt) AS profit_usdt,\n       SUM(trades_count) AS trades_count\nFROM trade_daily_profit\nWHERE stat_date BETWEEN $__timeFrom()::date AND $__timeTo()::date\n  AND ('$strategy' = 'All' OR strategy = '$strategy')\n  AND ('$route_type' = 'All' OR route_type = '$route_type')\n  AND ('$symbol' = 'All' OR symbol = '$symbol')\n  AND (\n    '$exchange_filter' = 'All'\n    OR exchange = '$exchange_filter'\n    OR buy_exchange = '$exchange_filter'\n    OR sell_exchange = '$exchange_filter'\n    OR spot_exchange = '$exchange_filter'\n    OR futures_exchange = '$exchange_filter'\n  )\nGROUP BY route\nORDER BY profit_usdt DESC\nLIMIT 20",
+          "refId": "A"
+        }
+      ],
+      "title": "Exchange Routes",
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "tags": [
+    "arbitrage",
+    "history",
+    "postgres"
+  ],
+  "templating": {
+    "list": [
+      {
+        "allValue": "All",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "All"
+        },
+        "datasource": {
+          "type": "postgres",
+          "uid": "trade-postgres"
+        },
+        "definition": "SELECT DISTINCT strategy FROM trade_daily_profit ORDER BY 1",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Strategy",
+        "multi": false,
+        "name": "strategy",
+        "options": [],
+        "query": "SELECT DISTINCT strategy FROM trade_daily_profit ORDER BY 1",
+        "refresh": 1,
+        "type": "query"
+      },
+      {
+        "allValue": "All",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "All"
+        },
+        "datasource": {
+          "type": "postgres",
+          "uid": "trade-postgres"
+        },
+        "definition": "SELECT DISTINCT route_type FROM trade_daily_profit ORDER BY 1",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Route Type",
+        "multi": false,
+        "name": "route_type",
+        "options": [],
+        "query": "SELECT DISTINCT route_type FROM trade_daily_profit ORDER BY 1",
+        "refresh": 1,
+        "type": "query"
+      },
+      {
+        "allValue": "All",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "All"
+        },
+        "datasource": {
+          "type": "postgres",
+          "uid": "trade-postgres"
+        },
+        "definition": "SELECT DISTINCT symbol FROM trade_daily_profit ORDER BY 1",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Symbol",
+        "multi": false,
+        "name": "symbol",
+        "options": [],
+        "query": "SELECT DISTINCT symbol FROM trade_daily_profit ORDER BY 1",
+        "refresh": 1,
+        "type": "query"
+      },
+      {
+        "allValue": "All",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "All"
+        },
+        "datasource": {
+          "type": "postgres",
+          "uid": "trade-postgres"
+        },
+        "definition": "SELECT exchange_name FROM (\n  SELECT DISTINCT exchange AS exchange_name FROM trade_daily_profit WHERE exchange <> ''\n  UNION\n  SELECT DISTINCT buy_exchange AS exchange_name FROM trade_daily_profit WHERE buy_exchange <> ''\n  UNION\n  SELECT DISTINCT sell_exchange AS exchange_name FROM trade_daily_profit WHERE sell_exchange <> ''\n  UNION\n  SELECT DISTINCT spot_exchange AS exchange_name FROM trade_daily_profit WHERE spot_exchange <> ''\n  UNION\n  SELECT DISTINCT futures_exchange AS exchange_name FROM trade_daily_profit WHERE futures_exchange <> ''\n) exchanges ORDER BY 1",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Exchange",
+        "multi": false,
+        "name": "exchange_filter",
+        "options": [],
+        "query": "SELECT exchange_name FROM (\n  SELECT DISTINCT exchange AS exchange_name FROM trade_daily_profit WHERE exchange <> ''\n  UNION\n  SELECT DISTINCT buy_exchange AS exchange_name FROM trade_daily_profit WHERE buy_exchange <> ''\n  UNION\n  SELECT DISTINCT sell_exchange AS exchange_name FROM trade_daily_profit WHERE sell_exchange <> ''\n  UNION\n  SELECT DISTINCT spot_exchange AS exchange_name FROM trade_daily_profit WHERE spot_exchange <> ''\n  UNION\n  SELECT DISTINCT futures_exchange AS exchange_name FROM trade_daily_profit WHERE futures_exchange <> ''\n) exchanges ORDER BY 1",
+        "refresh": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Arbitrage History",
+  "uid": "tradebot-history",
+  "version": 1
+}

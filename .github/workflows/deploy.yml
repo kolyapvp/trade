@@ -1,0 +1,79 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: production
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Verify Python syntax
+        run: python3 -m compileall bot main.py
+
+      - name: Verify deploy script syntax
+        run: bash -n ops/deploy.sh
+
+  deploy:
+    name: Deploy To Host
+    runs-on: ubuntu-latest
+    needs:
+      - validate
+    timeout-minutes: 20
+    environment:
+      name: production
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+      TARGET_SHA: ${{ github.sha }}
+    steps:
+      - name: Validate deploy secrets
+        run: |
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_USER"
+          test -n "$DEPLOY_SSH_KEY"
+
+      - name: Configure SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "${DEPLOY_PORT:-22}" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Run remote deploy
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -p "${DEPLOY_PORT:-22}" "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<EOF
+          set -euo pipefail
+          REPO_DIR="${DEPLOY_PATH:-/opt/trade}"
+          BRANCH="main"
+          TARGET_SHA="${TARGET_SHA}"
+          cd "$REPO_DIR"
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "working tree is dirty"
+            exit 1
+          fi
+          git fetch origin "$BRANCH"
+          git rev-parse --verify "${TARGET_SHA}^{commit}" >/dev/null
+          git merge-base --is-ancestor "$TARGET_SHA" "origin/$BRANCH"
+          git merge --ff-only "$TARGET_SHA"
+          docker compose config >/dev/null
+          docker compose up -d --build --remove-orphans
+          docker compose ps
+          EOF

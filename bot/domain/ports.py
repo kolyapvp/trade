@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
+from .entities import ClosedTradeAnalytics, OpenPositionSnapshot
 from .value_objects import Fee, OrderBook
 
 
@@ -36,6 +37,21 @@ class ExchangeInfo:
     supports_futures: bool = False
 
 
+@dataclass(frozen=True)
+class ExchangeOrder:
+    id: str
+    symbol: str
+    side: str
+    type: str
+    amount: float
+    filled: float
+    base_amount: float
+    average: float
+    cost: float
+    status: str
+    reduce_only: bool = False
+
+
 class IExchange(abc.ABC):
     info: ExchangeInfo
 
@@ -53,6 +69,28 @@ class IExchange(abc.ABC):
 
     @abc.abstractmethod
     async def fetch_futures_ticker(self, symbol: str) -> Optional[FuturesTicker]:
+        ...
+
+    @abc.abstractmethod
+    async def fetch_free_balance(self, currency: str) -> float:
+        ...
+
+    @abc.abstractmethod
+    async def normalize_order_amount(self, symbol: str, base_amount: float) -> float:
+        ...
+
+    @abc.abstractmethod
+    async def convert_order_amount_to_base(self, symbol: str, order_amount: float) -> float:
+        ...
+
+    @abc.abstractmethod
+    async def create_market_order(
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        reduce_only: bool = False,
+    ) -> ExchangeOrder:
         ...
 
     @abc.abstractmethod
@@ -169,4 +207,62 @@ class IMetricsService(abc.ABC):
 
     @abc.abstractmethod
     def record_error(self, stage: str, exchange: str = '', symbol: str = '') -> None:
+        ...
+
+
+class IOpenPositionStore(abc.ABC):
+    @abc.abstractmethod
+    async def save(self, snapshot: OpenPositionSnapshot) -> None:
+        ...
+
+    @abc.abstractmethod
+    async def delete(self, symbol: str) -> None:
+        ...
+
+    @abc.abstractmethod
+    async def get_all(self) -> list[OpenPositionSnapshot]:
+        ...
+
+    @abc.abstractmethod
+    async def close(self) -> None:
+        ...
+
+
+class IOpenPositionSnapshotRepository(abc.ABC):
+    @abc.abstractmethod
+    async def initialize(self) -> None:
+        ...
+
+    @abc.abstractmethod
+    async def upsert(self, snapshot: OpenPositionSnapshot) -> None:
+        ...
+
+    @abc.abstractmethod
+    async def replace_all(self, snapshots: list[OpenPositionSnapshot]) -> None:
+        ...
+
+    @abc.abstractmethod
+    async def delete(self, symbol: str) -> None:
+        ...
+
+    @abc.abstractmethod
+    async def get_all(self) -> list[OpenPositionSnapshot]:
+        ...
+
+    @abc.abstractmethod
+    async def close(self) -> None:
+        ...
+
+
+class ITradeAnalyticsRepository(abc.ABC):
+    @abc.abstractmethod
+    async def initialize(self) -> None:
+        ...
+
+    @abc.abstractmethod
+    async def record_closed_trade(self, trade: ClosedTradeAnalytics) -> bool:
+        ...
+
+    @abc.abstractmethod
+    async def backfill_closed_trades(self, trades: list[ClosedTradeAnalytics]) -> int:
         ...

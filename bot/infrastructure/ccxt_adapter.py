@@ -5,7 +5,7 @@ from typing import Optional
 
 import ccxt.async_support as ccxt
 
-from ..domain.ports import IExchange, ExchangeInfo, Ticker, FuturesTicker
+from ..domain.ports import IExchange, ExchangeInfo, ExchangeOrder, Ticker, FuturesTicker
 from ..domain.value_objects import Fee, OrderBook, OrderBookLevel
 
 
@@ -120,6 +120,62 @@ class CcxtExchangeAdapter(IExchange):
         except Exception:
             return None
 
+    async def fetch_free_balance(self, currency: str) -> float:
+        balance = await self._exchange.fetch_balance()
+        free = balance.get('free') or {}
+        value = free.get(currency)
+        if value is None:
+            account = balance.get(currency) or {}
+            value = account.get('free', 0.0)
+        return float(value or 0.0)
+
+    async def normalize_order_amount(self, symbol: str, base_amount: float) -> float:
+        market_symbol, market = await self._get_market(symbol)
+        if base_amount <= 0:
+            return 0.0
+        if market.get('contract'):
+            contract_size = float(market.get('contractSize') or 1.0)
+            order_amount = base_amount / contract_size
+        else:
+            order_amount = base_amount
+        precise = self._exchange.amount_to_precision(market_symbol, order_amount)
+        return float(precise)
+
+    async def convert_order_amount_to_base(self, symbol: str, order_amount: float) -> float:
+        if order_amount <= 0:
+            return 0.0
+        _, market = await self._get_market(symbol)
+        if market.get('contract'):
+            contract_size = float(market.get('contractSize') or 1.0)
+            return float(order_amount) * contract_size
+        return float(order_amount)
+
+    async def create_market_order(
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        reduce_only: bool = False,
+    ) -> ExchangeOrder:
+        market_symbol, market = await self._get_market(symbol)
+        params = {'reduceOnly': True} if reduce_only else {}
+        raw = await self._exchange.create_order(market_symbol, 'market', side, amount, None, params)
+        filled = float(raw.get('filled') or raw.get('amount') or amount or 0.0)
+        base_amount = await self.convert_order_amount_to_base(symbol, filled)
+        return ExchangeOrder(
+            id=str(raw.get('id') or ''),
+            symbol=market_symbol,
+            side=str(raw.get('side') or side),
+            type=str(raw.get('type') or 'market'),
+            amount=float(raw.get('amount') or amount or 0.0),
+            filled=filled,
+            base_amount=base_amount,
+            average=float(raw.get('average') or raw.get('price') or 0.0),
+            cost=float(raw.get('cost') or 0.0),
+            status=str(raw.get('status') or 'open'),
+            reduce_only=reduce_only and bool(market.get('contract')),
+        )
+
     async def is_available(self) -> bool:
         try:
             await self._exchange.fetch_status()
@@ -160,6 +216,11 @@ class CcxtExchangeAdapter(IExchange):
             await self._ensure_markets_loaded()
         return self._symbol_cache.get(symbol, symbol)
 
+    async def _get_market(self, symbol: str) -> tuple[str, dict]:
+        await self._ensure_markets_loaded()
+        market_symbol = await self._resolve_alias_symbol(symbol)
+        return market_symbol, self._exchange.market(market_symbol)
+
     async def _resolve_symbol_from_exception(self, symbol: str, exc: Exception) -> str:
         if not self._is_unknown_symbol_error(exc):
             return self._symbol_cache.get(symbol, symbol)
@@ -177,6 +238,15 @@ class CcxtExchangeAdapter(IExchange):
             for alias in SYMBOL_ALIASES.get(symbol, ()):
                 if alias in self._exchange.markets:
                     resolved = alias
+                    break
+            if resolved == symbol:
+                base, _, quote = symbol.partition('/')
+                for market_symbol, market in self._exchange.markets.items():
+                    if market.get('base') != base or market.get('quote') != quote:
+                        continue
+                    if bool(market.get('contract')) != self.info.supports_futures:
+                        continue
+                    resolved = market_symbol
                     break
 
         self._symbol_cache[symbol] = resolved
