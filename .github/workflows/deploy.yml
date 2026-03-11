@@ -59,11 +59,9 @@ jobs:
 
       - name: Run remote deploy
         run: |
-          ssh -i ~/.ssh/id_ed25519 -p "${DEPLOY_PORT:-22}" "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<EOF
+          ssh -i ~/.ssh/id_ed25519 -p "${DEPLOY_PORT:-22}" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "REPO_DIR='${DEPLOY_PATH:-/opt/trade}' BRANCH='main' TARGET_SHA='$TARGET_SHA' bash -s" <<'EOF'
           set -euo pipefail
-          REPO_DIR="${DEPLOY_PATH:-/opt/trade}"
-          BRANCH="main"
-          TARGET_SHA="${TARGET_SHA}"
           cd "$REPO_DIR"
           if ! git diff --quiet || ! git diff --cached --quiet; then
             echo "working tree is dirty"
