@@ -31,7 +31,9 @@ services:
   trade-bot:
     build: .
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     volumes:
       - ./data:/app/data
     environment:
