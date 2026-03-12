@@ -374,6 +374,7 @@ class ExecuteDemoTradeUseCase:
         trade = VirtualTrade(
             strategy=opp.strategy,
             symbol=opp.symbol,
+            mode='demo',
             position_size_usdt=opp.position_size_usdt,
             expected_profit_usdt=opp.profit_usdt,
             expected_profit_percent=opp.profit_percent,
@@ -405,6 +406,7 @@ class FuturesSpotPositionManager:
         snapshot_repository: IOpenPositionSnapshotRepository,
         analytics_repository: ITradeAnalyticsRepository,
         analytics_timezone: str,
+        trading_mode: str = 'demo',
         futures_leverage: int = 5,
         futures_margin_mode: str = 'isolated',
         spot_execution_exchanges: Optional[dict[str, IExchange]] = None,
@@ -416,6 +418,7 @@ class FuturesSpotPositionManager:
         self._snapshot_repository = snapshot_repository
         self._analytics = analytics_repository
         self._analytics_timezone = analytics_timezone
+        self._trading_mode = trading_mode
         self._futures_leverage = futures_leverage
         self._futures_margin_mode = futures_margin_mode
         self._positions: dict[str, FuturesSpotPosition | FuturesFundingPosition] = {}
@@ -798,6 +801,7 @@ class FuturesSpotPositionManager:
         trade = VirtualTrade(
             strategy='futures_spot',
             symbol=pos.symbol,
+            mode=self._trading_mode,
             position_size_usdt=pos.position_usdt,
             expected_profit_usdt=expected_profit,
             expected_profit_percent=expected_pct,
@@ -826,6 +830,7 @@ class FuturesSpotPositionManager:
         trade = VirtualTrade(
             strategy='futures_funding',
             symbol=pos.symbol,
+            mode=self._trading_mode,
             position_size_usdt=pos.position_usdt,
             expected_profit_usdt=expected_profit,
             expected_profit_percent=expected_pct,
@@ -915,6 +920,7 @@ def build_closed_trade_analytics(trade: VirtualTrade, analytics_timezone: str) -
         return ClosedTradeAnalytics(
             trade_id=trade.id,
             closed_day=closed_day,
+            mode=trade.mode,
             strategy=trade.strategy,
             route_type='cross_exchange',
             symbol=trade.symbol,
@@ -934,6 +940,7 @@ def build_closed_trade_analytics(trade: VirtualTrade, analytics_timezone: str) -
         return ClosedTradeAnalytics(
             trade_id=trade.id,
             closed_day=closed_day,
+            mode=trade.mode,
             strategy=trade.strategy,
             route_type='single_exchange',
             symbol=trade.symbol,
@@ -952,6 +959,7 @@ def build_closed_trade_analytics(trade: VirtualTrade, analytics_timezone: str) -
         return ClosedTradeAnalytics(
             trade_id=trade.id,
             closed_day=closed_day,
+            mode=trade.mode,
             strategy=trade.strategy,
             route_type='cross_exchange',
             symbol=trade.symbol,
@@ -971,6 +979,7 @@ def build_closed_trade_analytics(trade: VirtualTrade, analytics_timezone: str) -
     return ClosedTradeAnalytics(
         trade_id=trade.id,
         closed_day=closed_day,
+        mode=trade.mode,
         strategy=trade.strategy,
         route_type=route_type,
         symbol=trade.symbol,
