@@ -25,18 +25,22 @@ class TelegramAlertService(IAlertService):
             return self._build_closed_message(alert)
         return self._build_opened_message(alert)
 
+    def _mode_label(self, alert: TradeAlert) -> str:
+        return 'LIVE' if alert.mode == 'real' else 'DEMO'
+
     def _build_opened_message(self, alert: TradeAlert) -> str:
         icons = {'cross_exchange': '⇄', 'triangular': '△', 'futures_spot': '◈', 'futures_funding': '⟐'}
         labels = {'cross_exchange': 'МЕЖБИРЖЕВОЙ', 'triangular': 'ТРЕУГОЛЬНЫЙ', 'futures_spot': 'ФЬЮЧ-СПОТ', 'futures_funding': 'ФАНДИНГ'}
         icon = icons.get(alert.strategy, '●')
         label = labels.get(alert.strategy, alert.strategy.upper())
+        mode_label = self._mode_label(alert)
 
         profit_emoji = '🟢' if alert.profit_usdt > 0 else '🔴'
         hour_sign = '+' if alert.profit_last_hour >= 0 else ''
         day_sign = '+' if alert.profit_last_24h >= 0 else ''
 
         lines = [
-            f'{icon} <b>Арбитраж — {label}</b>',
+            f'{icon} <b>[{mode_label}] Арбитраж — {label}</b>',
             f'📊 Пара: <code>{alert.symbol}</code>',
             f'{profit_emoji} Ожид. прибыль: <b>+{alert.profit_percent:.4f}%</b>  /  <b>+${alert.profit_usdt:.4f}</b>',
             f'💰 Позиция: ${alert.position_usdt:.0f}',
@@ -58,6 +62,7 @@ class TelegramAlertService(IAlertService):
 
     def _build_closed_message(self, alert: TradeAlert) -> str:
         profit = alert.profit_usdt
+        mode_label = self._mode_label(alert)
         profit_emoji = '✅' if profit >= 0 else '❌'
         profit_sign = '+' if profit >= 0 else ''
         pct_sign = '+' if alert.profit_percent >= 0 else ''
@@ -80,7 +85,7 @@ class TelegramAlertService(IAlertService):
         title = labels.get(alert.strategy, alert.strategy.upper())
         marker = '⟐' if alert.strategy == 'futures_funding' else '◈'
         lines = [
-            f'{marker} <b>{title} — ПОЗИЦИЯ ЗАКРЫТА</b>',
+            f'{marker} <b>[{mode_label}] {title} — ПОЗИЦИЯ ЗАКРЫТА</b>',
             f'📊 Пара: <code>{alert.symbol}</code>',
             f'{profit_emoji} P&L: <b>{profit_sign}${profit:.4f}</b>  ({pct_sign}{alert.profit_percent:.4f}%)',
             f'⏱ Держалась: <b>{duration_str}</b>',

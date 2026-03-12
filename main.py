@@ -153,7 +153,7 @@ async def bootstrap() -> None:
         all_exchanges = spot_exchanges + futures_exchanges
         portfolio = Portfolio(initial_capital=10_000.0)
         metrics_service = (
-            PrometheusMetricsService(config.metrics_port)
+            PrometheusMetricsService(config.metrics_port, config.mode)
             if config.metrics_enabled else NullMetricsService()
         )
 
@@ -260,6 +260,7 @@ async def bootstrap() -> None:
             snapshot_repository,
             analytics_repository,
             config.analytics_timezone,
+            config.mode,
             futures_leverage=config.futures_leverage,
             futures_margin_mode=config.futures_margin_mode,
             spot_execution_exchanges=live_spot_exchange_map,

@@ -134,6 +134,7 @@ class ITradeRepository(abc.ABC):
 class TradeAlert:
     strategy: str
     symbol: str
+    mode: str
     profit_percent: float
     profit_usdt: float
     position_usdt: float

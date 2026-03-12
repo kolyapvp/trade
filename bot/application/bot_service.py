@@ -410,6 +410,7 @@ class ArbitrageBotService:
                     alert = TradeAlert(
                         strategy=trade.strategy,
                         symbol=pos.symbol,
+                        mode=self._mode,
                         profit_percent=trade.expected_profit_percent,
                         profit_usdt=trade.actual_profit_usdt or 0.0,
                         position_usdt=pos.position_usdt,
@@ -451,6 +452,7 @@ class ArbitrageBotService:
                             alert = TradeAlert(
                                 strategy=opp.strategy,
                                 symbol=opp.symbol,
+                                mode=self._mode,
                                 profit_percent=opp.profit_percent,
                                 profit_usdt=opp.profit_usdt,
                                 position_usdt=opp.position_size_usdt,
@@ -471,6 +473,7 @@ class ArbitrageBotService:
                             alert = TradeAlert(
                                 strategy=opp.strategy,
                                 symbol=opp.symbol,
+                                mode=self._mode,
                                 profit_percent=opp.profit_percent,
                                 profit_usdt=opp.profit_usdt,
                                 position_usdt=opp.position_size_usdt,
@@ -501,6 +504,7 @@ class ArbitrageBotService:
                             alert = TradeAlert(
                                 strategy=opp.strategy,
                                 symbol=opp.symbol,
+                                mode=self._mode,
                                 profit_percent=opp.profit_percent,
                                 profit_usdt=trade.actual_profit_usdt or opp.profit_usdt,
                                 position_usdt=opp.position_size_usdt,

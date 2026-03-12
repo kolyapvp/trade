@@ -32,6 +32,7 @@ class NullMetricsService(IMetricsService):
 
 class PrometheusMetricsService(IMetricsService):
     _signal_labels = (
+        'mode',
         'strategy',
         'symbol',
         'route_type',
@@ -42,25 +43,30 @@ class PrometheusMetricsService(IMetricsService):
         'futures_exchange',
     )
 
-    def __init__(self, port: int):
+    def __init__(self, port: int, mode: str):
         self._port = port
+        self._mode = mode
         self._started = False
         self._scan_duration = Histogram(
             'tradebot_scan_duration_seconds',
             'Scan cycle duration in seconds',
+            ('mode',),
             buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30),
         )
         self._scan_total = Counter(
             'tradebot_scan_total',
             'Completed scan cycles',
+            ('mode',),
         )
         self._scan_opportunities_total = Counter(
             'tradebot_scan_opportunities_total',
             'Signals found during completed scans',
+            ('mode',),
         )
         self._scan_errors_total = Counter(
             'tradebot_scan_errors_total',
             'Errors captured during scans',
+            ('mode',),
         )
         self._signal_total = Counter(
             'tradebot_signal_total',
@@ -95,28 +101,32 @@ class PrometheusMetricsService(IMetricsService):
         self._exchange_signal_total = Counter(
             'tradebot_signal_exchange_total',
             'Exchange participation in detected signals',
-            ('strategy', 'exchange', 'market_role', 'route_type'),
+            ('mode', 'strategy', 'exchange', 'market_role', 'route_type'),
         )
         self._bot_running = Gauge(
             'tradebot_bot_running',
             'Whether the bot loop is currently running',
+            ('mode',),
         )
         self._open_positions = Gauge(
             'tradebot_open_positions',
             'Open futures-spot positions',
+            ('mode',),
         )
         self._last_scan_duration_ms = Gauge(
             'tradebot_last_scan_duration_ms',
             'Duration of the most recent completed scan in milliseconds',
+            ('mode',),
         )
         self._last_scan_timestamp = Gauge(
             'tradebot_last_scan_timestamp_seconds',
             'Unix timestamp of the most recent completed scan',
+            ('mode',),
         )
         self._errors_total = Counter(
             'tradebot_errors_total',
             'Application errors',
-            ('stage', 'exchange', 'symbol'),
+            ('mode', 'stage', 'exchange', 'symbol'),
         )
 
     def start(self) -> None:
@@ -126,18 +136,18 @@ class PrometheusMetricsService(IMetricsService):
         self._started = True
 
     def set_bot_running(self, is_running: bool) -> None:
-        self._bot_running.set(1 if is_running else 0)
+        self._bot_running.labels(mode=self._mode).set(1 if is_running else 0)
 
     def set_open_positions(self, total: int) -> None:
-        self._open_positions.set(total)
+        self._open_positions.labels(mode=self._mode).set(total)
 
     def record_scan(self, telemetry: ScanTelemetry) -> None:
-        self._scan_total.inc()
-        self._scan_duration.observe(telemetry.duration_ms / 1000)
-        self._scan_opportunities_total.inc(telemetry.opportunities_count)
-        self._scan_errors_total.inc(telemetry.errors_count)
-        self._last_scan_duration_ms.set(telemetry.duration_ms)
-        self._last_scan_timestamp.set(telemetry.scanned_at.timestamp())
+        self._scan_total.labels(mode=self._mode).inc()
+        self._scan_duration.labels(mode=self._mode).observe(telemetry.duration_ms / 1000)
+        self._scan_opportunities_total.labels(mode=self._mode).inc(telemetry.opportunities_count)
+        self._scan_errors_total.labels(mode=self._mode).inc(telemetry.errors_count)
+        self._last_scan_duration_ms.labels(mode=self._mode).set(telemetry.duration_ms)
+        self._last_scan_timestamp.labels(mode=self._mode).set(telemetry.scanned_at.timestamp())
 
     def record_signal(self, telemetry: SignalTelemetry) -> None:
         labels = self._signal_label_values(telemetry)
@@ -155,21 +165,25 @@ class PrometheusMetricsService(IMetricsService):
             self._trade_realized_loss_usdt_total.labels(**labels).inc(abs(telemetry.realized_profit_usdt))
 
     def record_error(self, stage: str, exchange: str = '', symbol: str = '') -> None:
-        self._errors_total.labels(stage=stage, exchange=exchange, symbol=symbol).inc()
+        self._errors_total.labels(mode=self._mode, stage=stage, exchange=exchange, symbol=symbol).inc()
 
     def _signal_label_values(self, telemetry: SignalTelemetry | TradeTelemetry) -> dict[str, str]:
         data = asdict(telemetry)
-        return {label: str(data.get(label, '')) for label in self._signal_labels}
+        values = {label: str(data.get(label, '')) for label in self._signal_labels if label != 'mode'}
+        values['mode'] = self._mode
+        return values
 
     def _record_exchange_signal(self, telemetry: SignalTelemetry) -> None:
         if telemetry.strategy == 'cross_exchange':
             self._exchange_signal_total.labels(
+                mode=self._mode,
                 strategy=telemetry.strategy,
                 exchange=telemetry.buy_exchange,
                 market_role='spot_buy',
                 route_type=telemetry.route_type,
             ).inc()
             self._exchange_signal_total.labels(
+                mode=self._mode,
                 strategy=telemetry.strategy,
                 exchange=telemetry.sell_exchange,
                 market_role='spot_sell',
@@ -179,12 +193,14 @@ class PrometheusMetricsService(IMetricsService):
 
         if telemetry.strategy == 'futures_spot':
             self._exchange_signal_total.labels(
+                mode=self._mode,
                 strategy=telemetry.strategy,
                 exchange=telemetry.spot_exchange,
                 market_role='spot',
                 route_type=telemetry.route_type,
             ).inc()
             self._exchange_signal_total.labels(
+                mode=self._mode,
                 strategy=telemetry.strategy,
                 exchange=telemetry.futures_exchange,
                 market_role='futures',
@@ -194,12 +210,14 @@ class PrometheusMetricsService(IMetricsService):
 
         if telemetry.strategy == 'futures_funding':
             self._exchange_signal_total.labels(
+                mode=self._mode,
                 strategy=telemetry.strategy,
                 exchange=telemetry.buy_exchange,
                 market_role='futures_long',
                 route_type=telemetry.route_type,
             ).inc()
             self._exchange_signal_total.labels(
+                mode=self._mode,
                 strategy=telemetry.strategy,
                 exchange=telemetry.sell_exchange,
                 market_role='futures_short',
@@ -208,6 +226,7 @@ class PrometheusMetricsService(IMetricsService):
             return
 
         self._exchange_signal_total.labels(
+            mode=self._mode,
             strategy=telemetry.strategy,
             exchange=telemetry.exchange,
             market_role='triangular',

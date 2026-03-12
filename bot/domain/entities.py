@@ -88,6 +88,7 @@ class OpenPositionSnapshot:
 class ClosedTradeAnalytics:
     trade_id: str
     closed_day: date
+    mode: str
     strategy: str
     route_type: str
     symbol: str
@@ -380,6 +381,7 @@ class VirtualTrade:
         self,
         strategy: ArbitrageStrategy,
         symbol: str,
+        mode: str,
         position_size_usdt: float,
         expected_profit_usdt: float,
         expected_profit_percent: float,
@@ -388,6 +390,7 @@ class VirtualTrade:
         self.id = f'vtrade-{strategy}-{uuid.uuid4().hex[:8]}'
         self.strategy = strategy
         self.symbol = symbol
+        self.mode = mode
         self.position_size_usdt = position_size_usdt
         self.expected_profit_usdt = expected_profit_usdt
         self.expected_profit_percent = expected_profit_percent
@@ -410,6 +413,7 @@ class VirtualTrade:
             'id': self.id,
             'strategy': self.strategy,
             'symbol': self.symbol,
+            'mode': self.mode,
             'position_size_usdt': self.position_size_usdt,
             'expected_profit_usdt': self.expected_profit_usdt,
             'expected_profit_percent': self.expected_profit_percent,
@@ -426,6 +430,7 @@ class VirtualTrade:
         trade = cls(
             strategy=data['strategy'],
             symbol=data['symbol'],
+            mode=data.get('mode', 'demo'),
             position_size_usdt=float(data['position_size_usdt']),
             expected_profit_usdt=float(data['expected_profit_usdt']),
             expected_profit_percent=float(data['expected_profit_percent']),

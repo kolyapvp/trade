@@ -23,6 +23,7 @@ class PostgresTradeAnalyticsRepository(ITradeAnalyticsRepository):
             CREATE TABLE IF NOT EXISTS {self._trades_table} (
                 trade_id TEXT PRIMARY KEY,
                 closed_day DATE NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'demo',
                 strategy TEXT NOT NULL,
                 route_type TEXT NOT NULL,
                 symbol TEXT NOT NULL,
@@ -40,6 +41,9 @@ class PostgresTradeAnalyticsRepository(ITradeAnalyticsRepository):
                 created_at TIMESTAMP NOT NULL DEFAULT NOW()
             )
             '''
+        )
+        await self._pool.execute(
+            f"ALTER TABLE {self._trades_table} ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'demo'"
         )
         await self._pool.execute(
             f'''
@@ -63,6 +67,7 @@ class PostgresTradeAnalyticsRepository(ITradeAnalyticsRepository):
             f'''
             CREATE TABLE IF NOT EXISTS {self._daily_table} (
                 stat_date DATE NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'demo',
                 strategy TEXT NOT NULL,
                 route_type TEXT NOT NULL,
                 symbol TEXT NOT NULL,
@@ -80,6 +85,7 @@ class PostgresTradeAnalyticsRepository(ITradeAnalyticsRepository):
                 updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
                 PRIMARY KEY (
                     stat_date,
+                    mode,
                     strategy,
                     route_type,
                     symbol,
@@ -92,6 +98,7 @@ class PostgresTradeAnalyticsRepository(ITradeAnalyticsRepository):
             )
             '''
         )
+        await self._ensure_daily_table_mode_dimension()
         await self._pool.execute(
             f'''
             CREATE INDEX IF NOT EXISTS idx_{self._daily_table}_stat_date
@@ -113,6 +120,7 @@ class PostgresTradeAnalyticsRepository(ITradeAnalyticsRepository):
                     INSERT INTO {self._trades_table} (
                         trade_id,
                         closed_day,
+                        mode,
                         strategy,
                         route_type,
                         symbol,
@@ -128,12 +136,13 @@ class PostgresTradeAnalyticsRepository(ITradeAnalyticsRepository):
                         opened_at,
                         closed_at
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
                     ON CONFLICT (trade_id) DO NOTHING
                     RETURNING trade_id
                     ''',
                     trade.trade_id,
                     trade.closed_day,
+                    trade.mode,
                     trade.strategy,
                     trade.route_type,
                     trade.symbol,
@@ -166,6 +175,7 @@ class PostgresTradeAnalyticsRepository(ITradeAnalyticsRepository):
             f'''
             INSERT INTO {self._daily_table} (
                 stat_date,
+                mode,
                 strategy,
                 route_type,
                 symbol,
@@ -182,9 +192,10 @@ class PostgresTradeAnalyticsRepository(ITradeAnalyticsRepository):
                 loss_count,
                 updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 1, $13, $14, NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 1, $14, $15, NOW())
             ON CONFLICT (
                 stat_date,
+                mode,
                 strategy,
                 route_type,
                 symbol,
@@ -204,6 +215,7 @@ class PostgresTradeAnalyticsRepository(ITradeAnalyticsRepository):
                 updated_at = NOW()
             ''',
             trade.closed_day,
+            trade.mode,
             trade.strategy,
             trade.route_type,
             trade.symbol,
@@ -218,3 +230,112 @@ class PostgresTradeAnalyticsRepository(ITradeAnalyticsRepository):
             1 if trade.realized_profit_usdt > 0 else 0,
             1 if trade.realized_profit_usdt <= 0 else 0,
         )
+
+    async def _ensure_daily_table_mode_dimension(self) -> None:
+        mode_exists = await self._pool.fetchval(
+            '''
+            SELECT EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = $1
+                  AND column_name = 'mode'
+            )
+            ''',
+            self._daily_table,
+        )
+        if mode_exists:
+            return
+
+        temp_table = f'{self._daily_table}__mode_migration'
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    f'''
+                    CREATE TABLE {temp_table} (
+                        stat_date DATE NOT NULL,
+                        mode TEXT NOT NULL DEFAULT 'demo',
+                        strategy TEXT NOT NULL,
+                        route_type TEXT NOT NULL,
+                        symbol TEXT NOT NULL,
+                        exchange TEXT NOT NULL DEFAULT '',
+                        buy_exchange TEXT NOT NULL DEFAULT '',
+                        sell_exchange TEXT NOT NULL DEFAULT '',
+                        spot_exchange TEXT NOT NULL DEFAULT '',
+                        futures_exchange TEXT NOT NULL DEFAULT '',
+                        profit_usdt DOUBLE PRECISION NOT NULL DEFAULT 0,
+                        expected_profit_usdt DOUBLE PRECISION NOT NULL DEFAULT 0,
+                        position_usdt DOUBLE PRECISION NOT NULL DEFAULT 0,
+                        trades_count INTEGER NOT NULL DEFAULT 0,
+                        win_count INTEGER NOT NULL DEFAULT 0,
+                        loss_count INTEGER NOT NULL DEFAULT 0,
+                        updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                        PRIMARY KEY (
+                            stat_date,
+                            mode,
+                            strategy,
+                            route_type,
+                            symbol,
+                            exchange,
+                            buy_exchange,
+                            sell_exchange,
+                            spot_exchange,
+                            futures_exchange
+                        )
+                    )
+                    '''
+                )
+                await conn.execute(
+                    f'''
+                    INSERT INTO {temp_table} (
+                        stat_date,
+                        mode,
+                        strategy,
+                        route_type,
+                        symbol,
+                        exchange,
+                        buy_exchange,
+                        sell_exchange,
+                        spot_exchange,
+                        futures_exchange,
+                        profit_usdt,
+                        expected_profit_usdt,
+                        position_usdt,
+                        trades_count,
+                        win_count,
+                        loss_count,
+                        updated_at
+                    )
+                    SELECT
+                        stat_date,
+                        'demo' AS mode,
+                        strategy,
+                        route_type,
+                        symbol,
+                        exchange,
+                        buy_exchange,
+                        sell_exchange,
+                        spot_exchange,
+                        futures_exchange,
+                        SUM(profit_usdt) AS profit_usdt,
+                        SUM(expected_profit_usdt) AS expected_profit_usdt,
+                        SUM(position_usdt) AS position_usdt,
+                        SUM(trades_count) AS trades_count,
+                        SUM(win_count) AS win_count,
+                        SUM(loss_count) AS loss_count,
+                        MAX(updated_at) AS updated_at
+                    FROM {self._daily_table}
+                    GROUP BY
+                        stat_date,
+                        strategy,
+                        route_type,
+                        symbol,
+                        exchange,
+                        buy_exchange,
+                        sell_exchange,
+                        spot_exchange,
+                        futures_exchange
+                    '''
+                )
+                await conn.execute(f'DROP TABLE {self._daily_table}')
+                await conn.execute(f'ALTER TABLE {temp_table} RENAME TO {self._daily_table}')
