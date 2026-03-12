@@ -37,9 +37,17 @@ class ExchangeFactory:
         ex = ccxt.okx({**_creds(creds), 'options': {'defaultType': 'spot'}, 'enableRateLimit': True})
         return CcxtExchangeAdapter(ex, Fee.okx(), False)
 
+    def create_okx_futures(self, creds: ExchangeCredentials | None = None) -> CcxtExchangeAdapter:
+        ex = ccxt.okx({**_creds(creds), 'options': {'defaultType': 'swap'}, 'enableRateLimit': True})
+        return CcxtExchangeAdapter(ex, Fee(0.0002, 0.0005), True)
+
     def create_kucoin(self, creds: ExchangeCredentials | None = None) -> CcxtExchangeAdapter:
         ex = ccxt.kucoin({**_creds(creds), 'enableRateLimit': True})
         return CcxtExchangeAdapter(ex, Fee.kucoin(), False)
+
+    def create_kucoin_futures(self, creds: ExchangeCredentials | None = None) -> CcxtExchangeAdapter:
+        ex = ccxt.kucoinfutures({**_creds(creds), 'enableRateLimit': True})
+        return CcxtExchangeAdapter(ex, Fee(0.0002, 0.0006), True, exchange_id='kucoin')
 
     def create_gateio(self, creds: ExchangeCredentials | None = None) -> CcxtExchangeAdapter:
         ex = ccxt.gateio({
@@ -53,14 +61,38 @@ class ExchangeFactory:
         })
         return CcxtExchangeAdapter(ex, Fee.gateio(), False)
 
+    def create_gateio_futures(self, creds: ExchangeCredentials | None = None) -> CcxtExchangeAdapter:
+        ex = ccxt.gateio({
+            **_creds(creds),
+            'enableRateLimit': True,
+            'timeout': 30000,
+            'options': {
+                'defaultType': 'swap',
+                'fetchMarkets': {'types': ['swap']},
+            },
+        })
+        return CcxtExchangeAdapter(ex, Fee(0.0002, 0.0005), True)
+
     def create_mexc(self, creds: ExchangeCredentials | None = None) -> CcxtExchangeAdapter:
         ex = ccxt.mexc({**_creds(creds), 'enableRateLimit': True})
         return CcxtExchangeAdapter(ex, Fee.mexc(), False)
+
+    def create_mexc_futures(self, creds: ExchangeCredentials | None = None) -> CcxtExchangeAdapter:
+        ex = ccxt.mexc({**_creds(creds), 'options': {'defaultType': 'swap'}, 'enableRateLimit': True})
+        return CcxtExchangeAdapter(ex, Fee(0.0, 0.0002), True)
 
     def create_bitget(self, creds: ExchangeCredentials | None = None) -> CcxtExchangeAdapter:
         ex = ccxt.bitget({**_creds(creds), 'enableRateLimit': True})
         return CcxtExchangeAdapter(ex, Fee.bitget(), False)
 
+    def create_bitget_futures(self, creds: ExchangeCredentials | None = None) -> CcxtExchangeAdapter:
+        ex = ccxt.bitget({**_creds(creds), 'options': {'defaultType': 'swap'}, 'enableRateLimit': True})
+        return CcxtExchangeAdapter(ex, Fee(0.0002, 0.0006), True)
+
     def create_htx(self, creds: ExchangeCredentials | None = None) -> CcxtExchangeAdapter:
         ex = ccxt.htx({**_creds(creds), 'enableRateLimit': True})
         return CcxtExchangeAdapter(ex, Fee.htx(), False)
+
+    def create_htx_futures(self, creds: ExchangeCredentials | None = None) -> CcxtExchangeAdapter:
+        ex = ccxt.htx({**_creds(creds), 'options': {'defaultType': 'swap'}, 'enableRateLimit': True})
+        return CcxtExchangeAdapter(ex, Fee(0.0002, 0.0005), True)

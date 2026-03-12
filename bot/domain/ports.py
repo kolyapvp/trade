@@ -76,6 +76,10 @@ class IExchange(abc.ABC):
         ...
 
     @abc.abstractmethod
+    async def get_trading_fee(self, symbol: str) -> Fee:
+        ...
+
+    @abc.abstractmethod
     async def normalize_order_amount(self, symbol: str, base_amount: float) -> float:
         ...
 
@@ -91,6 +95,16 @@ class IExchange(abc.ABC):
         amount: float,
         reduce_only: bool = False,
     ) -> ExchangeOrder:
+        ...
+
+    @abc.abstractmethod
+    async def prepare_futures_execution(
+        self,
+        symbol: str,
+        leverage: int,
+        margin_mode: str,
+        one_way: bool = True,
+    ) -> None:
         ...
 
     @abc.abstractmethod

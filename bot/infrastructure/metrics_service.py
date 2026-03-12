@@ -192,6 +192,21 @@ class PrometheusMetricsService(IMetricsService):
             ).inc()
             return
 
+        if telemetry.strategy == 'futures_funding':
+            self._exchange_signal_total.labels(
+                strategy=telemetry.strategy,
+                exchange=telemetry.buy_exchange,
+                market_role='futures_long',
+                route_type=telemetry.route_type,
+            ).inc()
+            self._exchange_signal_total.labels(
+                strategy=telemetry.strategy,
+                exchange=telemetry.sell_exchange,
+                market_role='futures_short',
+                route_type=telemetry.route_type,
+            ).inc()
+            return
+
         self._exchange_signal_total.labels(
             strategy=telemetry.strategy,
             exchange=telemetry.exchange,

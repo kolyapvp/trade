@@ -10,8 +10,8 @@ from .use_cases import (
     ScanOpportunitiesUseCase, ExecuteDemoTradeUseCase,
     GenerateReportUseCase, LiveExecutionError, ScanConfig, FuturesSpotPositionManager,
 )
-from ..domain.entities import ArbitrageOpportunity, VirtualTrade, Portfolio, FuturesSpotPosition
-from ..domain.entities import CrossExchangeDetails, TriangularDetails, FuturesSpotDetails
+from ..domain.entities import ArbitrageOpportunity, VirtualTrade, Portfolio, FuturesSpotPosition, FuturesFundingPosition
+from ..domain.entities import CrossExchangeDetails, TriangularDetails, FuturesSpotDetails, FuturesFundingDetails
 from ..domain.ports import (
     IAlertService,
     IMetricsService,
@@ -117,9 +117,14 @@ class ArbitrageBotService:
     def _can_execute_live(self, opp: ArbitrageOpportunity) -> bool:
         if self._mode != 'real':
             return False
-        if opp.strategy != 'futures_spot':
+        if opp.strategy not in {'futures_spot', 'futures_funding'}:
             return False
         d = opp.details
+        if isinstance(d, FuturesFundingDetails):
+            return (
+                d.long_exchange in self._live_futures_exchange_ids
+                and d.short_exchange in self._live_futures_exchange_ids
+            )
         assert isinstance(d, FuturesSpotDetails)
         return (
             d.spot_exchange in self._live_spot_exchange_ids
@@ -154,6 +159,20 @@ class ArbitrageBotService:
                 exchange=d.exchange,
             )
 
+        if opp.strategy == 'futures_funding':
+            d = opp.details
+            assert isinstance(d, FuturesFundingDetails)
+            return SignalTelemetry(
+                strategy=opp.strategy,
+                symbol=opp.symbol,
+                route_type='cross_exchange',
+                expected_profit_usdt=opp.profit_usdt,
+                expected_profit_percent=opp.profit_percent,
+                position_usdt=opp.position_size_usdt,
+                buy_exchange=d.long_exchange,
+                sell_exchange=d.short_exchange,
+            )
+
         d = opp.details
         assert isinstance(d, FuturesSpotDetails)
         route_type = 'cross_exchange' if d.spot_exchange != d.futures_exchange else 'same_exchange'
@@ -176,7 +195,7 @@ class ArbitrageBotService:
         expected_profit_percent: float,
         realized_profit_usdt: float,
         position_usdt: float,
-        details: CrossExchangeDetails | TriangularDetails | FuturesSpotDetails,
+        details: CrossExchangeDetails | TriangularDetails | FuturesSpotDetails | FuturesFundingDetails,
     ) -> TradeTelemetry:
         if strategy == 'cross_exchange':
             assert isinstance(details, CrossExchangeDetails)
@@ -203,6 +222,20 @@ class ArbitrageBotService:
                 realized_profit_usdt=realized_profit_usdt,
                 position_usdt=position_usdt,
                 exchange=details.exchange,
+            )
+
+        if strategy == 'futures_funding':
+            assert isinstance(details, FuturesFundingDetails)
+            return TradeTelemetry(
+                strategy=strategy,
+                symbol=symbol,
+                route_type='cross_exchange',
+                expected_profit_usdt=expected_profit_usdt,
+                expected_profit_percent=expected_profit_percent,
+                realized_profit_usdt=realized_profit_usdt,
+                position_usdt=position_usdt,
+                buy_exchange=details.long_exchange,
+                sell_exchange=details.short_exchange,
             )
 
         assert isinstance(details, FuturesSpotDetails)
@@ -233,6 +266,15 @@ class ArbitrageBotService:
             d = opp.details
             assert isinstance(d, TriangularDetails)
             return f'Путь: {" → ".join(d.path)} | ${d.start_amount:.2f} → ${d.end_amount:.2f}'
+        if opp.strategy == 'futures_funding':
+            d = opp.details
+            assert isinstance(d, FuturesFundingDetails)
+            return (
+                f'LONG {d.long_exchange}: ${d.long_price:.4f} | '
+                f'SHORT {d.short_exchange}: ${d.short_price:.4f} | '
+                f'Фандинг: {(d.funding_rate_delta * 100):.4f}% | '
+                f'Спред входа: {d.entry_spread_percent:.4f}%'
+            )
         d = opp.details
         assert isinstance(d, FuturesSpotDetails)
         return (
@@ -262,6 +304,20 @@ class ArbitrageBotService:
                 steps.append(f'{i}️⃣ {d.path[i-1]} → <b>{d.path[i]}</b>  (биржа: {d.exchange})')
             steps.append(f'✅ Итог: ${d.start_amount:.2f} → <b>${d.end_amount:.4f}</b> USDT')
             return steps
+
+        if opp.strategy == 'futures_funding':
+            d = opp.details
+            assert isinstance(d, FuturesFundingDetails)
+            target_suffix = ''
+            if d.target_funding_time:
+                target_suffix = f' около {datetime.fromtimestamp(d.target_funding_time / 1000).strftime("%H:%M")}'
+            return [
+                f'📌 <b>Арбитраж фандинга</b> 🔀 <b>кросс-биржа</b>',
+                f'1️⃣ Открыть <b>LONG</b> на <b>{d.long_exchange}</b> по ${d.long_price:.4f}',
+                f'2️⃣ Открыть <b>SHORT</b> на <b>{d.short_exchange}</b> по ${d.short_price:.4f}',
+                f'3️⃣ Получить разницу фандинга: <b>{(d.funding_rate_delta * 100):+.4f}%</b>',
+                f'4️⃣ Закрыть обе фьючерсные ноги после начисления{target_suffix}',
+            ]
 
         d = opp.details
         assert isinstance(d, FuturesSpotDetails)
@@ -325,7 +381,7 @@ class ArbitrageBotService:
             for pos, trade in closed_positions:
                 self._stats.total_trades_executed += 1
                 self._metrics.record_trade(self._build_trade_telemetry(
-                    strategy='futures_spot',
+                    strategy=trade.strategy,
                     symbol=trade.symbol,
                     expected_profit_usdt=trade.expected_profit_usdt,
                     expected_profit_percent=trade.expected_profit_percent,
@@ -337,8 +393,22 @@ class ArbitrageBotService:
                 if self._on_position_closed:
                     self._on_position_closed(pos, trade)
                 if self._alert_service:
+                    if isinstance(pos, FuturesFundingPosition):
+                        entry_spot_price = pos.entry_long_price
+                        entry_futures_price = pos.entry_short_price
+                        entry_basis_percent = pos.entry_spread_percent
+                        exit_spot_price = pos.exit_long_price
+                        exit_futures_price = pos.exit_short_price
+                        exit_basis_percent = pos.exit_spread_percent
+                    else:
+                        entry_spot_price = pos.entry_spot_price
+                        entry_futures_price = pos.entry_futures_price
+                        entry_basis_percent = pos.entry_basis_percent
+                        exit_spot_price = pos.exit_spot_price
+                        exit_futures_price = pos.exit_futures_price
+                        exit_basis_percent = pos.exit_basis_percent
                     alert = TradeAlert(
-                        strategy='futures_spot',
+                        strategy=trade.strategy,
                         symbol=pos.symbol,
                         profit_percent=trade.expected_profit_percent,
                         profit_usdt=trade.actual_profit_usdt or 0.0,
@@ -351,12 +421,12 @@ class ArbitrageBotService:
                         alert_type='closed',
                         hours_held=pos.hours_open(),
                         close_reason=pos.close_reason,
-                        entry_spot_price=pos.entry_spot_price,
-                        entry_futures_price=pos.entry_futures_price,
-                        entry_basis_percent=pos.entry_basis_percent,
-                        exit_spot_price=pos.exit_spot_price,
-                        exit_futures_price=pos.exit_futures_price,
-                        exit_basis_percent=pos.exit_basis_percent,
+                        entry_spot_price=entry_spot_price,
+                        entry_futures_price=entry_futures_price,
+                        entry_basis_percent=entry_basis_percent,
+                        exit_spot_price=exit_spot_price,
+                        exit_futures_price=exit_futures_price,
+                        exit_basis_percent=exit_basis_percent,
                     )
                     asyncio.create_task(self._alert_service.send_trade_alert(alert))
 
@@ -369,7 +439,7 @@ class ArbitrageBotService:
                 if not opp.is_profitable(self._scan_config.min_profit_percent):
                     continue
 
-                if opp.strategy == 'futures_spot':
+                if opp.strategy in {'futures_spot', 'futures_funding'}:
                     if self._position_manager.has_open_position(opp.symbol):
                         continue
                     if self._mode == 'demo':

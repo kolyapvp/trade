@@ -20,10 +20,12 @@ class CcxtExchangeAdapter(IExchange):
         exchange: ccxt.Exchange,
         fee: Fee,
         supports_futures: bool = False,
+        exchange_id: str | None = None,
     ):
         self._exchange = exchange
+        self._exchange_id = exchange_id or exchange.id
         self.info = ExchangeInfo(
-            id=exchange.id,
+            id=self._exchange_id,
             name=getattr(exchange, 'name', exchange.id),
             fee=fee,
             supports_spot=True,
@@ -40,7 +42,7 @@ class CcxtExchangeAdapter(IExchange):
         asks = [OrderBookLevel(price=a[0], quantity=a[1]) for a in (raw.get('asks') or [])]
         return OrderBook(
             symbol=market_symbol,
-            exchange_id=self._exchange.id,
+            exchange_id=self.info.id,
             bids=bids,
             asks=asks,
             timestamp=raw.get('timestamp') or 0,
@@ -50,7 +52,7 @@ class CcxtExchangeAdapter(IExchange):
         market_symbol, raw = await self._call_exchange_method('fetch_ticker', symbol)
         return Ticker(
             symbol=market_symbol,
-            exchange_id=self._exchange.id,
+            exchange_id=self.info.id,
             bid=raw.get('bid') or 0.0,
             ask=raw.get('ask') or 0.0,
             last=raw.get('last') or 0.0,
@@ -68,7 +70,7 @@ class CcxtExchangeAdapter(IExchange):
                     if t:
                         result.append(Ticker(
                             symbol=symbol,
-                            exchange_id=self._exchange.id,
+                            exchange_id=self.info.id,
                             bid=t.get('bid') or 0.0,
                             ask=t.get('ask') or 0.0,
                             last=t.get('last') or 0.0,
@@ -101,12 +103,21 @@ class CcxtExchangeAdapter(IExchange):
             next_funding = 0
             if funding:
                 funding_rate = funding.get('fundingRate') or 0.0
-                next_funding = funding.get('nextFundingDatetime') or 0
+                raw_next_funding = (
+                    funding.get('nextFundingTimestamp')
+                    or funding.get('nextFundingDatetime')
+                    or funding.get('nextFundingTime')
+                    or 0
+                )
+                if isinstance(raw_next_funding, str):
+                    next_funding = self._exchange.parse8601(raw_next_funding) or 0
+                else:
+                    next_funding = int(raw_next_funding or 0)
 
             info = raw.get('info') or {}
             return FuturesTicker(
                 symbol=market_symbol,
-                exchange_id=self._exchange.id,
+                exchange_id=self.info.id,
                 bid=raw.get('bid') or 0.0,
                 ask=raw.get('ask') or 0.0,
                 last=raw.get('last') or 0.0,
@@ -128,6 +139,15 @@ class CcxtExchangeAdapter(IExchange):
             account = balance.get(currency) or {}
             value = account.get('free', 0.0)
         return float(value or 0.0)
+
+    async def get_trading_fee(self, symbol: str) -> Fee:
+        _, market = await self._get_market(symbol)
+        maker = market.get('maker')
+        taker = market.get('taker')
+        return Fee(
+            float(maker if maker is not None else self.info.fee.maker),
+            float(taker if taker is not None else self.info.fee.taker),
+        )
 
     async def normalize_order_amount(self, symbol: str, base_amount: float) -> float:
         market_symbol, market = await self._get_market(symbol)
@@ -176,6 +196,70 @@ class CcxtExchangeAdapter(IExchange):
             reduce_only=reduce_only and bool(market.get('contract')),
         )
 
+    async def prepare_futures_execution(
+        self,
+        symbol: str,
+        leverage: int,
+        margin_mode: str,
+        one_way: bool = True,
+    ) -> None:
+        if not self.info.supports_futures:
+            raise RuntimeError(f'Exchange {self.info.id} does not support futures execution')
+        if leverage < 1:
+            raise RuntimeError(f'Invalid leverage: {leverage}')
+        if margin_mode not in {'isolated', 'cross'}:
+            raise RuntimeError(f'Invalid margin mode: {margin_mode}')
+
+        market_symbol, market = await self._get_market(symbol)
+        if not market.get('contract'):
+            raise RuntimeError(f'Market {market_symbol} is not a futures market')
+
+        current_state = await self._read_futures_state(market_symbol, market)
+        if current_state['has_open_position']:
+            raise RuntimeError(
+                f'External futures position already exists on {self.info.id} for {market_symbol}'
+            )
+
+        if one_way and self._supports('setPositionMode'):
+            await self._apply_futures_setting(
+                self._exchange.set_position_mode(False, market_symbol),
+            )
+
+        current_margin_mode = current_state['margin_mode']
+        if current_margin_mode != margin_mode and self._supports('setMarginMode'):
+            await self._apply_futures_setting(
+                self._exchange.set_margin_mode(
+                    margin_mode,
+                    market_symbol,
+                    {'leverage': str(leverage)},
+                ),
+            )
+
+        if self._supports('setLeverage'):
+            await self._apply_futures_setting(
+                self._exchange.set_leverage(leverage, market_symbol),
+            )
+
+        verified_state = await self._read_futures_state(market_symbol, market)
+        if verified_state['has_open_position']:
+            raise RuntimeError(
+                f'Unexpected open futures position detected on {self.info.id} for {market_symbol}'
+            )
+        if one_way and verified_state['hedged']:
+            raise RuntimeError(
+                f'Position mode is hedged on {self.info.id} for {market_symbol}'
+            )
+        verified_margin_mode = verified_state['margin_mode']
+        if self._supports('setMarginMode') and verified_margin_mode not in {None, margin_mode}:
+            raise RuntimeError(
+                f'Margin mode mismatch on {self.info.id} for {market_symbol}: {verified_margin_mode}'
+            )
+        verified_leverage = verified_state['leverage']
+        if self._supports('setLeverage') and verified_leverage not in {None, float(leverage)}:
+            raise RuntimeError(
+                f'Leverage mismatch on {self.info.id} for {market_symbol}: {verified_leverage}'
+            )
+
     async def is_available(self) -> bool:
         try:
             await self._exchange.fetch_status()
@@ -220,6 +304,51 @@ class CcxtExchangeAdapter(IExchange):
         await self._ensure_markets_loaded()
         market_symbol = await self._resolve_alias_symbol(symbol)
         return market_symbol, self._exchange.market(market_symbol)
+
+    async def _read_futures_state(self, market_symbol: str, market: dict) -> dict[str, float | str | bool | None]:
+        params = {'subType': 'linear' if market.get('linear') else 'inverse'}
+        positions = await self._exchange.fetch_positions([market_symbol], params)
+        has_open_position = False
+        hedged = False
+        leverage = None
+
+        for position in positions:
+            contracts = float(position.get('contracts') or 0.0)
+            if abs(contracts) > 0:
+                has_open_position = True
+            if position.get('hedged') is True:
+                hedged = True
+            current_leverage = position.get('leverage')
+            if current_leverage is not None:
+                leverage = float(current_leverage)
+
+        margin_mode = None
+        if self._supports('fetchMarginMode'):
+            margin = await self._exchange.fetch_margin_mode(market_symbol)
+            margin_mode = margin.get('marginMode')
+
+        return {
+            'has_open_position': has_open_position,
+            'hedged': hedged,
+            'leverage': leverage,
+            'margin_mode': margin_mode,
+        }
+
+    async def _apply_futures_setting(self, operation) -> None:
+        try:
+            await operation
+        except Exception as exc:
+            if self._is_not_modified_error(exc):
+                return
+            raise
+
+    def _is_not_modified_error(self, exc: Exception) -> bool:
+        message = str(exc).lower()
+        return 'not modified' in message or 'same to original' in message
+
+    def _supports(self, capability: str) -> bool:
+        value = getattr(self._exchange, 'has', {}).get(capability)
+        return bool(value)
 
     async def _resolve_symbol_from_exception(self, symbol: str, exc: Exception) -> str:
         if not self._is_unknown_symbol_error(exc):

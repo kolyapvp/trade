@@ -63,6 +63,7 @@ async def bootstrap() -> None:
     dashboard.print_info(f'Интервал сканирования: {config.scan_interval_ms}мс')
     dashboard.print_info(f'Мин. прибыль: {config.min_profit_percent}%')
     dashboard.print_info(f'Макс. позиция: ${config.max_position_usdt}')
+    dashboard.print_info(f'Фьючерсы: {config.futures_margin_mode} | плечо {config.futures_leverage}x')
     dashboard.print_info(
         f'Метрики: {"включены" if config.metrics_enabled else "выключены"}'
         f'{" на порту " + str(config.metrics_port) if config.metrics_enabled else ""}'
@@ -127,6 +128,12 @@ async def bootstrap() -> None:
         futures_exchanges = [
             factory.create_binance_futures(creds_or_none('binance')),
             factory.create_bybit_futures(creds_or_none('bybit')),
+            factory.create_okx_futures(creds_or_none('okx')),
+            factory.create_kucoin_futures(creds_or_none('kucoin')),
+            factory.create_gateio_futures(creds_or_none('gateio')),
+            factory.create_mexc_futures(creds_or_none('mexc')),
+            factory.create_bitget_futures(creds_or_none('bitget')),
+            factory.create_htx_futures(creds_or_none('htx')),
         ]
 
         all_exchanges = spot_exchanges + futures_exchanges
@@ -151,6 +158,17 @@ async def bootstrap() -> None:
             dashboard.print_error('Ни одна биржа не доступна. Проверьте интернет-соединение.')
             sys.exit(1)
 
+        dashboard.print_info('Проверка доступности фьючерсных рынков...')
+        futures_avail = await asyncio.gather(*[ex.is_available() for ex in futures_exchanges], return_exceptions=True)
+
+        active_futures = []
+        for ex, ok in zip(futures_exchanges, futures_avail):
+            if ok is True:
+                dashboard.print_success(f'{ex.info.id} futures доступны')
+                active_futures.append(ex)
+            else:
+                dashboard.print_error(f'{ex.info.id} futures недоступны, пропускаем')
+
         live_spot_exchange_map = {
             exchange.info.id: exchange
             for exchange in active_spot
@@ -158,7 +176,7 @@ async def bootstrap() -> None:
         }
         live_futures_exchange_map = {
             exchange.info.id: exchange
-            for exchange in futures_exchanges
+            for exchange in active_futures
             if has_private_api(exchange.info.id)
         }
         if config.mode == 'real':
@@ -192,10 +210,11 @@ async def bootstrap() -> None:
             enable_cross_exchange=config.strategies.get('cross_exchange', True),
             enable_triangular=config.strategies.get('triangular', True),
             enable_futures_spot=config.strategies.get('futures_spot', True),
+            enable_futures_funding=config.strategies.get('futures_funding', True),
             futures_spot_long_only=config.futures_spot_long_only,
         )
 
-        scanner = ScanOpportunitiesUseCase(active_spot, futures_exchanges)
+        scanner = ScanOpportunitiesUseCase(active_spot, active_futures)
         executor = ExecuteDemoTradeUseCase(
             trade_repository,
             portfolio,
@@ -209,8 +228,10 @@ async def bootstrap() -> None:
             snapshot_repository,
             analytics_repository,
             config.analytics_timezone,
-            live_spot_exchange_map,
-            live_futures_exchange_map,
+            futures_leverage=config.futures_leverage,
+            futures_margin_mode=config.futures_margin_mode,
+            spot_execution_exchanges=live_spot_exchange_map,
+            futures_execution_exchanges=live_futures_exchange_map,
         )
         reporter = GenerateReportUseCase(trade_repository, portfolio)
         reporter.set_position_manager(position_manager)

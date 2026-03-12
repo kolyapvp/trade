@@ -26,8 +26,8 @@ class TelegramAlertService(IAlertService):
         return self._build_opened_message(alert)
 
     def _build_opened_message(self, alert: TradeAlert) -> str:
-        icons = {'cross_exchange': '⇄', 'triangular': '△', 'futures_spot': '◈'}
-        labels = {'cross_exchange': 'МЕЖБИРЖЕВОЙ', 'triangular': 'ТРЕУГОЛЬНЫЙ', 'futures_spot': 'ФЬЮЧ-СПОТ'}
+        icons = {'cross_exchange': '⇄', 'triangular': '△', 'futures_spot': '◈', 'futures_funding': '⟐'}
+        labels = {'cross_exchange': 'МЕЖБИРЖЕВОЙ', 'triangular': 'ТРЕУГОЛЬНЫЙ', 'futures_spot': 'ФЬЮЧ-СПОТ', 'futures_funding': 'ФАНДИНГ'}
         icon = icons.get(alert.strategy, '●')
         label = labels.get(alert.strategy, alert.strategy.upper())
 
@@ -76,8 +76,11 @@ class TelegramAlertService(IAlertService):
         else:
             duration_str = f'{s}сек'
 
+        labels = {'futures_spot': 'ФЬЮЧ-СПОТ', 'futures_funding': 'ФАНДИНГ'}
+        title = labels.get(alert.strategy, alert.strategy.upper())
+        marker = '⟐' if alert.strategy == 'futures_funding' else '◈'
         lines = [
-            '◈ <b>ФЬЮЧ-СПОТ — ПОЗИЦИЯ ЗАКРЫТА</b>',
+            f'{marker} <b>{title} — ПОЗИЦИЯ ЗАКРЫТА</b>',
             f'📊 Пара: <code>{alert.symbol}</code>',
             f'{profit_emoji} P&L: <b>{profit_sign}${profit:.4f}</b>  ({pct_sign}{alert.profit_percent:.4f}%)',
             f'⏱ Держалась: <b>{duration_str}</b>',
@@ -87,10 +90,16 @@ class TelegramAlertService(IAlertService):
         if alert.entry_spot_price is not None and alert.entry_futures_price is not None:
             entry_basis = alert.entry_basis_percent or 0.0
             exit_basis = alert.exit_basis_percent or 0.0
-            lines += [
-                f'📌 Вход: спот ${alert.entry_spot_price:.4f} / фьюч ${alert.entry_futures_price:.4f}  (базис {entry_basis:+.4f}%)',
-                f'📌 Выход: спот ${alert.exit_spot_price:.4f} / фьюч ${alert.exit_futures_price:.4f}  (базис {exit_basis:+.4f}%)',
-            ]
+            if alert.strategy == 'futures_funding':
+                lines += [
+                    f'📌 Вход: long ${alert.entry_spot_price:.4f} / short ${alert.entry_futures_price:.4f}  (спред {entry_basis:+.4f}%)',
+                    f'📌 Выход: long ${alert.exit_spot_price:.4f} / short ${alert.exit_futures_price:.4f}  (спред {exit_basis:+.4f}%)',
+                ]
+            else:
+                lines += [
+                    f'📌 Вход: спот ${alert.entry_spot_price:.4f} / фьюч ${alert.entry_futures_price:.4f}  (базис {entry_basis:+.4f}%)',
+                    f'📌 Выход: спот ${alert.exit_spot_price:.4f} / фьюч ${alert.exit_futures_price:.4f}  (базис {exit_basis:+.4f}%)',
+                ]
 
         if alert.close_reason:
             lines.append(f'🔄 Причина: {alert.close_reason}')

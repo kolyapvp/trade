@@ -10,7 +10,7 @@ from rich.text import Text
 from rich.panel import Panel
 from rich.columns import Columns
 
-from ..domain.entities import ArbitrageOpportunity, VirtualTrade, CrossExchangeDetails, TriangularDetails, FuturesSpotDetails, FuturesSpotPosition
+from ..domain.entities import ArbitrageOpportunity, VirtualTrade, CrossExchangeDetails, TriangularDetails, FuturesSpotDetails, FuturesSpotPosition, FuturesFundingDetails, FuturesFundingPosition
 from ..application.bot_service import BotStats
 from ..application.use_cases import SessionStats
 
@@ -73,8 +73,8 @@ class Dashboard:
         )
 
     def print_opportunity(self, opp: ArbitrageOpportunity, trade: VirtualTrade) -> None:
-        icons = {'cross_exchange': '⇄', 'triangular': '△', 'futures_spot': '◈'}
-        labels = {'cross_exchange': 'МЕЖБИРЖ', 'triangular': 'ТРЕУГОЛ', 'futures_spot': 'ФЬЮ-СПОТ'}
+        icons = {'cross_exchange': '⇄', 'triangular': '△', 'futures_spot': '◈', 'futures_funding': '⟐'}
+        labels = {'cross_exchange': 'МЕЖБИРЖ', 'triangular': 'ТРЕУГОЛ', 'futures_spot': 'ФЬЮ-СПОТ', 'futures_funding': 'ФАНДИНГ'}
         icon = icons.get(opp.strategy, '●')
         label = labels.get(opp.strategy, opp.strategy)
 
@@ -101,6 +101,13 @@ class Dashboard:
             console.print(
                 f'  [dim]Путь: {" → ".join(d.path)} | '
                 f'{d.start_amount:.2f} → {d.end_amount:.2f} USDT[/dim]'
+            )
+        elif opp.strategy == 'futures_funding':
+            d = opp.details
+            assert isinstance(d, FuturesFundingDetails)
+            console.print(
+                f'  [dim]LONG {d.long_exchange}: ${d.long_price:.2f} | SHORT {d.short_exchange}: ${d.short_price:.2f} | '
+                f'Фандинг: {(d.funding_rate_delta * 100):.4f}% | Спред входа: {d.entry_spread_percent:.4f}%[/dim]'
             )
         else:
             d = opp.details
@@ -130,29 +137,45 @@ class Dashboard:
             trade.status if trade else 'open_position',
         )
 
-    def print_position_closed(self, pos: FuturesSpotPosition, trade: VirtualTrade) -> None:
+    def print_position_closed(self, pos: FuturesSpotPosition | FuturesFundingPosition, trade: VirtualTrade) -> None:
         profit = trade.actual_profit_usdt or 0
         profit_style = 'bold green' if profit >= 0 else 'bold red'
         profit_sign = '+' if profit >= 0 else ''
         total_sec = int(pos.hours_open() * 3600)
         h = total_sec // 3600
         m = (total_sec % 3600) // 60
+        marker = '◈'
+        route = ''
+        if isinstance(pos, FuturesFundingPosition):
+            marker = '⟐'
+            route = f' | {pos.long_exchange}->{pos.short_exchange}'
         console.print()
         console.print(
-            f'[bold white]◈ [ЗАКРЫТА][/bold white] '
+            f'[bold white]{marker} [ЗАКРЫТА][/bold white] '
             f'[white]{pos.symbol}[/white]  '
             f'[{profit_style}]{profit_sign}${profit:.4f}[/{profit_style}]  '
-            f'[dim]держалась {h}ч {m}мин | {pos.close_reason}[/dim]'
+            f'[dim]держалась {h}ч {m}мин{route} | {pos.close_reason}[/dim]'
         )
-        logger.info(
-            'position_closed symbol=%s spot_exchange=%s futures_exchange=%s profit_usdt=%.4f held_minutes=%s reason=%s',
-            pos.symbol,
-            pos.spot_exchange,
-            pos.futures_exchange,
-            profit,
-            h * 60 + m,
-            pos.close_reason,
-        )
+        if isinstance(pos, FuturesFundingPosition):
+            logger.info(
+                'position_closed symbol=%s long_exchange=%s short_exchange=%s profit_usdt=%.4f held_minutes=%s reason=%s',
+                pos.symbol,
+                pos.long_exchange,
+                pos.short_exchange,
+                profit,
+                h * 60 + m,
+                pos.close_reason,
+            )
+        else:
+            logger.info(
+                'position_closed symbol=%s spot_exchange=%s futures_exchange=%s profit_usdt=%.4f held_minutes=%s reason=%s',
+                pos.symbol,
+                pos.spot_exchange,
+                pos.futures_exchange,
+                profit,
+                h * 60 + m,
+                pos.close_reason,
+            )
 
     def print_scan_result(self, opportunities: list[ArbitrageOpportunity], duration_ms: int) -> None:
         now = datetime.now().strftime('%H:%M:%S')

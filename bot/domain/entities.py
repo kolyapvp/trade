@@ -41,7 +41,24 @@ class FuturesSpotDetails:
     futures_taker_fee: float = 0.0
 
 
-StrategyDetails = Union[CrossExchangeDetails, TriangularDetails, FuturesSpotDetails]
+@dataclass
+class FuturesFundingDetails:
+    long_exchange: str
+    short_exchange: str
+    symbol: str
+    long_price: float
+    short_price: float
+    long_funding_rate: float
+    short_funding_rate: float
+    funding_rate_delta: float
+    entry_spread_percent: float
+    exit_spread_percent: float
+    target_funding_time: int = 0
+    long_taker_fee: float = 0.0
+    short_taker_fee: float = 0.0
+
+
+StrategyDetails = Union[CrossExchangeDetails, TriangularDetails, FuturesSpotDetails, FuturesFundingDetails]
 
 
 @dataclass(frozen=True)
@@ -58,6 +75,9 @@ class OpenPositionSnapshot:
     spot_taker_fee: float
     futures_taker_fee: float
     opened_at: datetime
+    strategy: str = 'futures_spot'
+    funding_rate_secondary: float = 0.0
+    target_close_at: Optional[datetime] = None
     spot_base_quantity: float = 0.0
     futures_base_quantity: float = 0.0
     spot_order_amount: float = 0.0
@@ -157,6 +177,7 @@ class FuturesSpotPosition:
         return OpenPositionSnapshot(
             position_id=self.id,
             symbol=self.symbol,
+            strategy='futures_spot',
             spot_exchange=self.spot_exchange,
             futures_exchange=self.futures_exchange,
             entry_spot_price=self.entry_spot_price,
@@ -166,6 +187,7 @@ class FuturesSpotPosition:
             position_usdt=self.position_usdt,
             spot_taker_fee=self.spot_taker_fee,
             futures_taker_fee=self.futures_taker_fee,
+            target_close_at=None,
             spot_base_quantity=self.spot_base_quantity,
             futures_base_quantity=self.futures_base_quantity,
             spot_order_amount=self.spot_order_amount,
@@ -193,6 +215,137 @@ class FuturesSpotPosition:
             position_id=snapshot.position_id,
             opened_at=snapshot.opened_at,
         )
+
+
+class FuturesFundingPosition:
+    MAX_HOLD_HOURS = 12
+
+    def __init__(
+        self,
+        symbol: str,
+        long_exchange: str,
+        short_exchange: str,
+        entry_long_price: float,
+        entry_short_price: float,
+        long_funding_rate: float,
+        short_funding_rate: float,
+        position_usdt: float,
+        long_taker_fee: float,
+        short_taker_fee: float,
+        target_close_at: Optional[datetime],
+        long_base_quantity: float = 0.0,
+        short_base_quantity: float = 0.0,
+        long_order_amount: float = 0.0,
+        short_order_amount: float = 0.0,
+        position_id: Optional[str] = None,
+        opened_at: Optional[datetime] = None,
+    ):
+        now = datetime.now()
+        implied_qty = position_usdt / entry_long_price if entry_long_price > 0 else 0.0
+        self.id = position_id or f'funding-{symbol}-{int(now.timestamp() * 1000)}'
+        self.symbol = symbol
+        self.long_exchange = long_exchange
+        self.short_exchange = short_exchange
+        self.entry_long_price = entry_long_price
+        self.entry_short_price = entry_short_price
+        self.long_funding_rate = long_funding_rate
+        self.short_funding_rate = short_funding_rate
+        self.position_usdt = position_usdt
+        self.long_taker_fee = long_taker_fee
+        self.short_taker_fee = short_taker_fee
+        self.target_close_at = target_close_at
+        self.long_base_quantity = long_base_quantity or implied_qty
+        self.short_base_quantity = short_base_quantity or implied_qty
+        self.long_order_amount = long_order_amount or self.long_base_quantity
+        self.short_order_amount = short_order_amount or self.short_base_quantity
+        self.opened_at = opened_at or now
+        self.status = 'open'
+        self.exit_long_price: float = 0.0
+        self.exit_short_price: float = 0.0
+        self.exit_spread_percent: float = 0.0
+        self.actual_profit_usdt: Optional[float] = None
+        self.closed_at: Optional[datetime] = None
+        self.close_reason: str = ''
+
+    @property
+    def funding_rate_delta(self) -> float:
+        return self.short_funding_rate - self.long_funding_rate
+
+    @property
+    def entry_spread_percent(self) -> float:
+        if self.entry_long_price <= 0:
+            return 0.0
+        return (self.entry_short_price - self.entry_long_price) / self.entry_long_price * 100
+
+    def close(self, exit_long: float, exit_short: float, reason: str) -> float:
+        long_pnl = self.long_base_quantity * (exit_long - self.entry_long_price)
+        short_pnl = self.short_base_quantity * (self.entry_short_price - exit_short)
+        funding_income = self.position_usdt * self.funding_rate_delta if self._funding_applied() else 0.0
+        total_fees = (self.long_taker_fee + self.short_taker_fee) * self.position_usdt * 2
+        profit = long_pnl + short_pnl + funding_income - total_fees
+        self.exit_long_price = exit_long
+        self.exit_short_price = exit_short
+        self.exit_spread_percent = ((exit_short - exit_long) / exit_long * 100) if exit_long > 0 else 0.0
+        self.actual_profit_usdt = profit
+        self.status = 'closed'
+        self.closed_at = datetime.now()
+        self.close_reason = reason
+        return profit
+
+    def hours_open(self) -> float:
+        return (datetime.now() - self.opened_at).total_seconds() / 3600
+
+    def to_snapshot(self) -> OpenPositionSnapshot:
+        return OpenPositionSnapshot(
+            position_id=self.id,
+            symbol=self.symbol,
+            strategy='futures_funding',
+            spot_exchange=self.long_exchange,
+            futures_exchange=self.short_exchange,
+            entry_spot_price=self.entry_long_price,
+            entry_futures_price=self.entry_short_price,
+            entry_basis_percent=self.entry_spread_percent,
+            funding_rate=self.long_funding_rate,
+            funding_rate_secondary=self.short_funding_rate,
+            position_usdt=self.position_usdt,
+            spot_taker_fee=self.long_taker_fee,
+            futures_taker_fee=self.short_taker_fee,
+            target_close_at=self.target_close_at,
+            spot_base_quantity=self.long_base_quantity,
+            futures_base_quantity=self.short_base_quantity,
+            spot_order_amount=self.long_order_amount,
+            futures_order_amount=self.short_order_amount,
+            opened_at=self.opened_at,
+        )
+
+    @classmethod
+    def from_snapshot(cls, snapshot: OpenPositionSnapshot) -> 'FuturesFundingPosition':
+        return cls(
+            symbol=snapshot.symbol,
+            long_exchange=snapshot.spot_exchange,
+            short_exchange=snapshot.futures_exchange,
+            entry_long_price=snapshot.entry_spot_price,
+            entry_short_price=snapshot.entry_futures_price,
+            long_funding_rate=snapshot.funding_rate,
+            short_funding_rate=snapshot.funding_rate_secondary,
+            position_usdt=snapshot.position_usdt,
+            long_taker_fee=snapshot.spot_taker_fee,
+            short_taker_fee=snapshot.futures_taker_fee,
+            target_close_at=snapshot.target_close_at,
+            long_base_quantity=snapshot.spot_base_quantity,
+            short_base_quantity=snapshot.futures_base_quantity,
+            long_order_amount=snapshot.spot_order_amount,
+            short_order_amount=snapshot.futures_order_amount,
+            position_id=snapshot.position_id,
+            opened_at=snapshot.opened_at,
+        )
+
+    def _funding_applied(self) -> bool:
+        if self.target_close_at is None:
+            return self.hours_open() >= 8
+        return datetime.now() >= self.target_close_at
+
+
 ArbitrageStrategy = str
 
 
@@ -385,6 +538,22 @@ def _parse_strategy_details(strategy: str, details: dict) -> StrategyDetails:
             start_amount=float(details.get('start_amount', 0.0)),
             end_amount=float(details.get('end_amount', 0.0)),
             fees=float(details.get('fees', 0.0)),
+        )
+    if strategy == 'futures_funding':
+        return FuturesFundingDetails(
+            long_exchange=details.get('long_exchange', ''),
+            short_exchange=details.get('short_exchange', ''),
+            symbol=details.get('symbol', ''),
+            long_price=float(details.get('long_price', 0.0)),
+            short_price=float(details.get('short_price', 0.0)),
+            long_funding_rate=float(details.get('long_funding_rate', 0.0)),
+            short_funding_rate=float(details.get('short_funding_rate', 0.0)),
+            funding_rate_delta=float(details.get('funding_rate_delta', 0.0)),
+            entry_spread_percent=float(details.get('entry_spread_percent', 0.0)),
+            exit_spread_percent=float(details.get('exit_spread_percent', 0.0)),
+            target_funding_time=int(details.get('target_funding_time', 0)),
+            long_taker_fee=float(details.get('long_taker_fee', 0.0)),
+            short_taker_fee=float(details.get('short_taker_fee', 0.0)),
         )
     return FuturesSpotDetails(
         spot_exchange=details.get('spot_exchange', ''),

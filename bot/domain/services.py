@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 from .value_objects import OrderBook, Fee
 from .ports import Ticker, FuturesTicker
 from .entities import (
@@ -7,6 +9,7 @@ from .entities import (
     CrossExchangeDetails,
     TriangularDetails,
     FuturesSpotDetails,
+    FuturesFundingDetails,
 )
 
 
@@ -99,6 +102,40 @@ class ProfitCalculator:
             'profit_percent': profit_percent,
             'basis': basis,
             'basis_percent': basis_percent,
+        }
+
+    def calculate_futures_funding(
+        self,
+        long_ticker: FuturesTicker,
+        short_ticker: FuturesTicker,
+        position_usdt: float,
+        long_fee: Fee,
+        short_fee: Fee,
+    ) -> dict:
+        long_entry = long_ticker.ask or long_ticker.last
+        short_entry = short_ticker.bid or short_ticker.last
+        long_exit = long_ticker.bid or long_ticker.last
+        short_exit = short_ticker.ask or short_ticker.last
+        if long_entry <= 0 or short_entry <= 0:
+            return self._empty()
+
+        funding_delta = short_ticker.funding_rate - long_ticker.funding_rate
+        funding_income = position_usdt * funding_delta
+        total_fees = (long_fee.calculate(position_usdt) + short_fee.calculate(position_usdt)) * 2
+        profit_usdt = funding_income - total_fees
+        profit_percent = (profit_usdt / position_usdt * 100) if position_usdt > 0 else 0.0
+        entry_spread_percent = (short_entry - long_entry) / long_entry * 100 if long_entry > 0 else 0.0
+        exit_spread_percent = (short_exit - long_exit) / long_exit * 100 if long_exit > 0 else 0.0
+
+        return {
+            'is_profitable': profit_usdt > 0,
+            'profit_usdt': profit_usdt,
+            'profit_percent': profit_percent,
+            'long_price': long_entry,
+            'short_price': short_entry,
+            'funding_rate_delta': funding_delta,
+            'entry_spread_percent': entry_spread_percent,
+            'exit_spread_percent': exit_spread_percent,
         }
 
     def _empty(self) -> dict:
@@ -264,5 +301,64 @@ class ArbitrageDetector:
                 basis_percent=result['basis_percent'],
                 spot_taker_fee=spot_fee.taker,
                 futures_taker_fee=futures_fee.taker,
+            ),
+        )
+
+    def detect_futures_funding(
+        self,
+        long_exchange_id: str,
+        short_exchange_id: str,
+        symbol: str,
+        long_ticker: FuturesTicker,
+        short_ticker: FuturesTicker,
+        long_fee: Fee,
+        short_fee: Fee,
+        position_usdt: float,
+        min_profit_percent: float,
+    ) -> ArbitrageOpportunity | None:
+        if long_exchange_id == short_exchange_id:
+            return None
+        result = self._calc.calculate_futures_funding(
+            long_ticker,
+            short_ticker,
+            position_usdt,
+            long_fee,
+            short_fee,
+        )
+        if not result['is_profitable'] or result['profit_percent'] < min_profit_percent:
+            return None
+        if result['funding_rate_delta'] <= 0:
+            return None
+        if result['entry_spread_percent'] < 0:
+            return None
+
+        long_next = long_ticker.next_funding_time or 0
+        short_next = short_ticker.next_funding_time or 0
+        if long_next and short_next and abs(long_next - short_next) > 15 * 60 * 1000:
+            return None
+        target_funding_time = max(long_next, short_next)
+        if target_funding_time == 0:
+            target_funding_time = int((datetime.now() + timedelta(hours=8)).timestamp() * 1000)
+
+        return ArbitrageOpportunity(
+            strategy='futures_funding',
+            symbol=symbol,
+            profit_usdt=result['profit_usdt'],
+            profit_percent=result['profit_percent'],
+            position_size_usdt=position_usdt,
+            details=FuturesFundingDetails(
+                long_exchange=long_exchange_id,
+                short_exchange=short_exchange_id,
+                symbol=symbol,
+                long_price=result['long_price'],
+                short_price=result['short_price'],
+                long_funding_rate=long_ticker.funding_rate,
+                short_funding_rate=short_ticker.funding_rate,
+                funding_rate_delta=result['funding_rate_delta'],
+                entry_spread_percent=result['entry_spread_percent'],
+                exit_spread_percent=result['exit_spread_percent'],
+                target_funding_time=target_funding_time,
+                long_taker_fee=long_fee.taker,
+                short_taker_fee=short_fee.taker,
             ),
         )

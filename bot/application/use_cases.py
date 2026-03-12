@@ -10,6 +10,7 @@ from ..domain.entities import (
     ArbitrageOpportunity, VirtualTrade, Portfolio,
     ClosedTradeAnalytics, CrossExchangeDetails, FuturesSpotPosition,
     FuturesSpotDetails, OpenPositionSnapshot, TriangularDetails,
+    FuturesFundingDetails, FuturesFundingPosition,
 )
 from ..domain.ports import (
     IExchange,
@@ -40,6 +41,7 @@ class ScanConfig:
     enable_cross_exchange: bool = True
     enable_triangular: bool = True
     enable_futures_spot: bool = True
+    enable_futures_funding: bool = True
     futures_spot_long_only: bool = True
 
 
@@ -160,14 +162,16 @@ class ScanOpportunitiesUseCase:
                         if not spot_ticker or not futures_ticker:
                             continue
                         try:
+                            spot_fee = await spot_ex.get_trading_fee(symbol)
+                            futures_fee = await futures_ex.get_trading_fee(symbol)
                             opp = self._detector.detect_futures_spot(
                                 spot_ex.info.id,
                                 futures_ex.info.id,
                                 symbol,
                                 spot_ticker,
                                 futures_ticker,
-                                spot_ex.info.fee,
-                                futures_ex.info.fee,
+                                spot_fee,
+                                futures_fee,
                                 cfg.position_size_usdt,
                                 cfg.min_profit_percent,
                                 long_only=cfg.futures_spot_long_only,
@@ -181,6 +185,48 @@ class ScanOpportunitiesUseCase:
                             errors.append(f'futures-spot {spot_ex.info.id}×{futures_ex.info.id} {symbol}: {e}')
 
             opportunities.extend(best_per_symbol.values())
+
+            if cfg.enable_futures_funding and len(futures_tickers_cache) >= 2:
+                best_funding_per_symbol: dict[str, ArbitrageOpportunity] = {}
+                futures_items = list(self._futures)
+                for long_ex in futures_items:
+                    long_tickers = futures_tickers_cache.get(long_ex.info.id, {})
+                    if not long_tickers:
+                        continue
+                    for short_ex in futures_items:
+                        if long_ex.info.id == short_ex.info.id:
+                            continue
+                        short_tickers = futures_tickers_cache.get(short_ex.info.id, {})
+                        if not short_tickers:
+                            continue
+                        for symbol in cfg.symbols:
+                            long_ticker = long_tickers.get(symbol)
+                            short_ticker = short_tickers.get(symbol)
+                            if not long_ticker or not short_ticker:
+                                continue
+                            try:
+                                long_fee = await long_ex.get_trading_fee(symbol)
+                                short_fee = await short_ex.get_trading_fee(symbol)
+                                opp = self._detector.detect_futures_funding(
+                                    long_ex.info.id,
+                                    short_ex.info.id,
+                                    symbol,
+                                    long_ticker,
+                                    short_ticker,
+                                    long_fee,
+                                    short_fee,
+                                    cfg.position_size_usdt,
+                                    cfg.min_profit_percent,
+                                )
+                                if opp:
+                                    observed_opportunities.append(opp)
+                                    prev = best_funding_per_symbol.get(symbol)
+                                    if prev is None or opp.profit_percent > prev.profit_percent:
+                                        best_funding_per_symbol[symbol] = opp
+                            except Exception as e:
+                                errors.append(f'futures-funding {long_ex.info.id}×{short_ex.info.id} {symbol}: {e}')
+
+                opportunities.extend(best_funding_per_symbol.values())
 
         opportunities.sort(key=lambda o: o.profit_percent, reverse=True)
 
@@ -245,6 +291,8 @@ class FuturesSpotPositionManager:
         snapshot_repository: IOpenPositionSnapshotRepository,
         analytics_repository: ITradeAnalyticsRepository,
         analytics_timezone: str,
+        futures_leverage: int = 5,
+        futures_margin_mode: str = 'isolated',
         spot_execution_exchanges: Optional[dict[str, IExchange]] = None,
         futures_execution_exchanges: Optional[dict[str, IExchange]] = None,
     ):
@@ -254,33 +302,58 @@ class FuturesSpotPositionManager:
         self._snapshot_repository = snapshot_repository
         self._analytics = analytics_repository
         self._analytics_timezone = analytics_timezone
-        self._positions: dict[str, FuturesSpotPosition] = {}
+        self._futures_leverage = futures_leverage
+        self._futures_margin_mode = futures_margin_mode
+        self._positions: dict[str, FuturesSpotPosition | FuturesFundingPosition] = {}
         self._spot_execution_exchanges = spot_execution_exchanges or {}
         self._futures_execution_exchanges = futures_execution_exchanges or {}
 
     def has_open_position(self, symbol: str) -> bool:
         return symbol in self._positions
 
-    async def open_position(self, opp: ArbitrageOpportunity) -> FuturesSpotPosition:
-        d = opp.details
-        assert isinstance(d, FuturesSpotDetails)
-        pos = FuturesSpotPosition(
-            symbol=opp.symbol,
-            spot_exchange=d.spot_exchange,
-            futures_exchange=d.futures_exchange,
-            entry_spot_price=d.spot_price,
-            entry_futures_price=d.futures_price,
-            entry_basis_percent=d.basis_percent,
-            funding_rate=d.funding_rate,
-            position_usdt=opp.position_size_usdt,
-            spot_taker_fee=d.spot_taker_fee,
-            futures_taker_fee=d.futures_taker_fee,
-        )
+    async def open_position(self, opp: ArbitrageOpportunity) -> FuturesSpotPosition | FuturesFundingPosition:
+        if opp.strategy == 'futures_funding':
+            d = opp.details
+            assert isinstance(d, FuturesFundingDetails)
+            target_close_at = datetime.fromtimestamp(d.target_funding_time / 1000) if d.target_funding_time else None
+            pos = FuturesFundingPosition(
+                symbol=opp.symbol,
+                long_exchange=d.long_exchange,
+                short_exchange=d.short_exchange,
+                entry_long_price=d.long_price,
+                entry_short_price=d.short_price,
+                long_funding_rate=d.long_funding_rate,
+                short_funding_rate=d.short_funding_rate,
+                position_usdt=opp.position_size_usdt,
+                long_taker_fee=d.long_taker_fee,
+                short_taker_fee=d.short_taker_fee,
+                target_close_at=target_close_at,
+            )
+        else:
+            d = opp.details
+            assert isinstance(d, FuturesSpotDetails)
+            pos = FuturesSpotPosition(
+                symbol=opp.symbol,
+                spot_exchange=d.spot_exchange,
+                futures_exchange=d.futures_exchange,
+                entry_spot_price=d.spot_price,
+                entry_futures_price=d.futures_price,
+                entry_basis_percent=d.basis_percent,
+                funding_rate=d.funding_rate,
+                position_usdt=opp.position_size_usdt,
+                spot_taker_fee=d.spot_taker_fee,
+                futures_taker_fee=d.futures_taker_fee,
+            )
         self._positions[opp.symbol] = pos
         await self._persist_position(pos)
         return pos
 
-    async def open_live_position(self, opp: ArbitrageOpportunity) -> FuturesSpotPosition:
+    async def open_live_position(self, opp: ArbitrageOpportunity) -> FuturesSpotPosition | FuturesFundingPosition:
+        if opp.strategy == 'futures_funding':
+            return await self._open_live_futures_funding_position(opp)
+        return await self._open_live_futures_spot_position(opp)
+
+    async def _open_live_futures_spot_position(self, opp: ArbitrageOpportunity) -> FuturesSpotPosition:
         d = opp.details
         assert isinstance(d, FuturesSpotDetails)
         spot_exchange = self._spot_execution_exchanges.get(d.spot_exchange)
@@ -289,6 +362,8 @@ class FuturesSpotPositionManager:
             raise LiveExecutionError(
                 f'Live execution unavailable for route {d.spot_exchange}->{d.futures_exchange}'
             )
+
+        await self._prepare_futures_exchange(futures_exchange, opp.symbol)
 
         free_spot_usdt = await spot_exchange.fetch_free_balance('USDT')
         if free_spot_usdt < opp.position_size_usdt:
@@ -342,154 +417,117 @@ class FuturesSpotPositionManager:
         await self._persist_position(pos)
         return pos
 
+    async def _open_live_futures_funding_position(self, opp: ArbitrageOpportunity) -> FuturesFundingPosition:
+        d = opp.details
+        assert isinstance(d, FuturesFundingDetails)
+        long_exchange = self._futures_execution_exchanges.get(d.long_exchange)
+        short_exchange = self._futures_execution_exchanges.get(d.short_exchange)
+        if long_exchange is None or short_exchange is None:
+            raise LiveExecutionError(
+                f'Live execution unavailable for route {d.long_exchange}->{d.short_exchange}'
+            )
+
+        await self._prepare_futures_exchange(long_exchange, opp.symbol)
+        await self._prepare_futures_exchange(short_exchange, opp.symbol)
+
+        required_margin = opp.position_size_usdt / max(self._futures_leverage, 1)
+        free_long_usdt = await long_exchange.fetch_free_balance('USDT')
+        if free_long_usdt < required_margin:
+            raise LiveExecutionError(
+                f'Insufficient futures margin on {d.long_exchange}: free={free_long_usdt:.4f}, required={required_margin:.4f}'
+            )
+        free_short_usdt = await short_exchange.fetch_free_balance('USDT')
+        if free_short_usdt < required_margin:
+            raise LiveExecutionError(
+                f'Insufficient futures margin on {d.short_exchange}: free={free_short_usdt:.4f}, required={required_margin:.4f}'
+            )
+
+        target_long_amount = await long_exchange.normalize_order_amount(
+            opp.symbol,
+            opp.position_size_usdt / d.long_price if d.long_price > 0 else 0.0,
+        )
+        if target_long_amount <= 0:
+            raise LiveExecutionError(f'Cannot normalize long amount for {opp.symbol} on {d.long_exchange}')
+
+        long_order = None
+        short_order = None
+        try:
+            long_order = await long_exchange.create_market_order(opp.symbol, 'buy', target_long_amount)
+            if long_order.base_amount <= 0:
+                raise LiveExecutionError(f'Long order filled zero quantity on {d.long_exchange}')
+
+            short_amount = await short_exchange.normalize_order_amount(opp.symbol, long_order.base_amount)
+            if short_amount <= 0:
+                raise LiveExecutionError(f'Cannot normalize short amount for {opp.symbol} on {d.short_exchange}')
+
+            short_order = await short_exchange.create_market_order(opp.symbol, 'sell', short_amount)
+            if short_order.base_amount <= 0:
+                raise LiveExecutionError(f'Short order filled zero quantity on {d.short_exchange}')
+        except Exception as exc:
+            if short_order is None and long_order is not None:
+                await self._rollback_futures_open(long_exchange, opp.symbol, long_order, 'sell')
+            raise LiveExecutionError(str(exc)) from exc
+
+        target_close_at = datetime.fromtimestamp(d.target_funding_time / 1000) if d.target_funding_time else None
+        pos = FuturesFundingPosition(
+            symbol=opp.symbol,
+            long_exchange=d.long_exchange,
+            short_exchange=d.short_exchange,
+            entry_long_price=long_order.average or d.long_price,
+            entry_short_price=short_order.average or d.short_price,
+            long_funding_rate=d.long_funding_rate,
+            short_funding_rate=d.short_funding_rate,
+            position_usdt=opp.position_size_usdt,
+            long_taker_fee=d.long_taker_fee,
+            short_taker_fee=d.short_taker_fee,
+            target_close_at=target_close_at,
+            long_base_quantity=long_order.base_amount,
+            short_base_quantity=short_order.base_amount,
+            long_order_amount=long_order.filled or long_order.amount,
+            short_order_amount=short_order.filled or short_order.amount,
+        )
+        self._positions[opp.symbol] = pos
+        await self._persist_position(pos)
+        return pos
+
     async def check_and_close(
         self,
         spot_prices: dict[str, dict[str, float]],
         futures_prices: dict[str, dict[str, float]],
-    ) -> list[tuple[FuturesSpotPosition, VirtualTrade]]:
+    ) -> list[tuple[FuturesSpotPosition | FuturesFundingPosition, VirtualTrade]]:
         results = []
         for symbol, pos in list(self._positions.items()):
-            current_spot = spot_prices.get(pos.spot_exchange, {}).get(symbol)
-            current_futures = futures_prices.get(pos.futures_exchange, {}).get(symbol)
-            if current_spot is None or current_futures is None:
-                continue
-
-            current_basis_pct = (
-                (current_futures - current_spot) / current_spot * 100
-            ) if current_spot > 0 else 999.0
-
-            reason: Optional[str] = None
-            if abs(current_basis_pct) < FuturesSpotPosition.CLOSE_THRESHOLD_PERCENT:
-                reason = f'Базис сошёлся к {current_basis_pct:.4f}%'
-            elif pos.hours_open() >= FuturesSpotPosition.MAX_HOLD_HOURS:
-                reason = f'Таймаут {FuturesSpotPosition.MAX_HOLD_HOURS}ч'
-
-            if reason:
+            if isinstance(pos, FuturesFundingPosition):
+                current_long = futures_prices.get(pos.long_exchange, {}).get(symbol)
+                current_short = futures_prices.get(pos.short_exchange, {}).get(symbol)
+                if current_long is None or current_short is None:
+                    continue
+                reason = self._funding_close_reason(pos)
+                if not reason:
+                    continue
+                pos.close(current_long, current_short, reason)
+                trade = self._build_futures_funding_trade(pos, reason)
+            else:
+                current_spot = spot_prices.get(pos.spot_exchange, {}).get(symbol)
+                current_futures = futures_prices.get(pos.futures_exchange, {}).get(symbol)
+                if current_spot is None or current_futures is None:
+                    continue
+                current_basis_pct = (
+                    (current_futures - current_spot) / current_spot * 100
+                ) if current_spot > 0 else 999.0
+                reason = None
+                if abs(current_basis_pct) < FuturesSpotPosition.CLOSE_THRESHOLD_PERCENT:
+                    reason = f'Базис сошёлся к {current_basis_pct:.4f}%'
+                elif pos.hours_open() >= FuturesSpotPosition.MAX_HOLD_HOURS:
+                    reason = f'Таймаут {FuturesSpotPosition.MAX_HOLD_HOURS}ч'
+                if not reason:
+                    continue
                 pos.close(current_spot, current_futures, reason)
-                del self._positions[symbol]
-                await self._open_position_store.delete(symbol)
-                await self._snapshot_repository.delete(symbol)
+                trade = self._build_futures_spot_trade(pos, reason)
 
-                entry_basis_profit = (
-                    pos.spot_base_quantity * max(pos.entry_futures_price - pos.entry_spot_price, 0.0)
-                ) + (
-                    pos.futures_base_quantity * max(pos.entry_spot_price - pos.entry_futures_price, 0.0)
-                )
-                entry_fees = (pos.spot_taker_fee + pos.futures_taker_fee) * pos.position_usdt * 2
-                expected_profit = entry_basis_profit + pos.position_usdt * pos.funding_rate - entry_fees
-                expected_pct = (expected_profit / pos.position_usdt * 100) if pos.position_usdt > 0 else 0.0
-
-                trade = VirtualTrade(
-                    strategy='futures_spot',
-                    symbol=pos.symbol,
-                    position_size_usdt=pos.position_usdt,
-                    expected_profit_usdt=expected_profit,
-                    expected_profit_percent=expected_pct,
-                    details=FuturesSpotDetails(
-                        spot_exchange=pos.spot_exchange,
-                        futures_exchange=pos.futures_exchange,
-                        symbol=pos.symbol,
-                        spot_price=pos.exit_spot_price,
-                        futures_price=pos.exit_futures_price,
-                        funding_rate=pos.funding_rate,
-                        basis=pos.exit_futures_price - pos.exit_spot_price,
-                        basis_percent=pos.exit_basis_percent,
-                        spot_taker_fee=pos.spot_taker_fee,
-                        futures_taker_fee=pos.futures_taker_fee,
-                    ),
-                )
-                trade.close(pos.actual_profit_usdt or 0.0, reason)
-                self._portfolio.add_trade(trade)
-                await self._repo.save(trade)
-                await self._analytics.record_closed_trade(
-                    build_closed_trade_analytics(trade, self._analytics_timezone)
-                )
-                results.append((pos, trade))
-
-        return results
-
-    async def check_and_close_live(
-        self,
-        spot_prices: dict[str, dict[str, float]],
-        futures_prices: dict[str, dict[str, float]],
-    ) -> list[tuple[FuturesSpotPosition, VirtualTrade]]:
-        results = []
-        for symbol, pos in list(self._positions.items()):
-            current_spot = spot_prices.get(pos.spot_exchange, {}).get(symbol)
-            current_futures = futures_prices.get(pos.futures_exchange, {}).get(symbol)
-            if current_spot is None or current_futures is None:
-                continue
-
-            current_basis_pct = (
-                (current_futures - current_spot) / current_spot * 100
-            ) if current_spot > 0 else 999.0
-
-            reason: Optional[str] = None
-            if abs(current_basis_pct) < FuturesSpotPosition.CLOSE_THRESHOLD_PERCENT:
-                reason = f'Базис сошёлся к {current_basis_pct:.4f}%'
-            elif pos.hours_open() >= FuturesSpotPosition.MAX_HOLD_HOURS:
-                reason = f'Таймаут {FuturesSpotPosition.MAX_HOLD_HOURS}ч'
-
-            if not reason:
-                continue
-
-            spot_exchange = self._spot_execution_exchanges.get(pos.spot_exchange)
-            futures_exchange = self._futures_execution_exchanges.get(pos.futures_exchange)
-            if spot_exchange is None or futures_exchange is None:
-                raise LiveExecutionError(
-                    f'Live close unavailable for route {pos.spot_exchange}->{pos.futures_exchange}'
-                )
-
-            futures_close = await futures_exchange.create_market_order(
-                symbol,
-                'buy',
-                pos.futures_order_amount,
-                reduce_only=True,
-            )
-            try:
-                spot_close = await spot_exchange.create_market_order(symbol, 'sell', pos.spot_order_amount)
-            except Exception as exc:
-                await self._rollback_futures_close(futures_exchange, symbol, pos.futures_order_amount)
-                raise LiveExecutionError(str(exc)) from exc
-
-            pos.close(
-                spot_close.average or current_spot,
-                futures_close.average or current_futures,
-                reason,
-            )
             del self._positions[symbol]
             await self._open_position_store.delete(symbol)
             await self._snapshot_repository.delete(symbol)
-
-            entry_basis_profit = (
-                pos.spot_base_quantity * max(pos.entry_futures_price - pos.entry_spot_price, 0.0)
-            ) + (
-                pos.futures_base_quantity * max(pos.entry_spot_price - pos.entry_futures_price, 0.0)
-            )
-            entry_fees = (pos.spot_taker_fee + pos.futures_taker_fee) * pos.position_usdt * 2
-            expected_profit = entry_basis_profit + pos.position_usdt * pos.funding_rate - entry_fees
-            expected_pct = (expected_profit / pos.position_usdt * 100) if pos.position_usdt > 0 else 0.0
-
-            trade = VirtualTrade(
-                strategy='futures_spot',
-                symbol=pos.symbol,
-                position_size_usdt=pos.position_usdt,
-                expected_profit_usdt=expected_profit,
-                expected_profit_percent=expected_pct,
-                details=FuturesSpotDetails(
-                    spot_exchange=pos.spot_exchange,
-                    futures_exchange=pos.futures_exchange,
-                    symbol=pos.symbol,
-                    spot_price=pos.exit_spot_price,
-                    futures_price=pos.exit_futures_price,
-                    funding_rate=pos.funding_rate,
-                    basis=pos.exit_futures_price - pos.exit_spot_price,
-                    basis_percent=pos.exit_basis_percent,
-                    spot_taker_fee=pos.spot_taker_fee,
-                    futures_taker_fee=pos.futures_taker_fee,
-                ),
-            )
-            trade.close(pos.actual_profit_usdt or 0.0, reason)
             self._portfolio.add_trade(trade)
             await self._repo.save(trade)
             await self._analytics.record_closed_trade(
@@ -499,11 +537,114 @@ class FuturesSpotPositionManager:
 
         return results
 
-    async def restore_positions(self, snapshots: list[OpenPositionSnapshot]) -> list[FuturesSpotPosition]:
-        restored: list[FuturesSpotPosition] = []
+    async def check_and_close_live(
+        self,
+        spot_prices: dict[str, dict[str, float]],
+        futures_prices: dict[str, dict[str, float]],
+    ) -> list[tuple[FuturesSpotPosition | FuturesFundingPosition, VirtualTrade]]:
+        results = []
+        for symbol, pos in list(self._positions.items()):
+            if isinstance(pos, FuturesFundingPosition):
+                current_long = futures_prices.get(pos.long_exchange, {}).get(symbol)
+                current_short = futures_prices.get(pos.short_exchange, {}).get(symbol)
+                if current_long is None or current_short is None:
+                    continue
+                reason = self._funding_close_reason(pos)
+                if not reason:
+                    continue
+                long_exchange = self._futures_execution_exchanges.get(pos.long_exchange)
+                short_exchange = self._futures_execution_exchanges.get(pos.short_exchange)
+                if long_exchange is None or short_exchange is None:
+                    raise LiveExecutionError(
+                        f'Live close unavailable for route {pos.long_exchange}->{pos.short_exchange}'
+                    )
+                short_close = await short_exchange.create_market_order(
+                    symbol,
+                    'buy',
+                    pos.short_order_amount,
+                    reduce_only=True,
+                )
+                try:
+                    long_close = await long_exchange.create_market_order(
+                        symbol,
+                        'sell',
+                        pos.long_order_amount,
+                        reduce_only=True,
+                    )
+                except Exception as exc:
+                    await self._rollback_futures_close(short_exchange, symbol, pos.short_order_amount)
+                    raise LiveExecutionError(str(exc)) from exc
+                pos.close(
+                    long_close.average or current_long,
+                    short_close.average or current_short,
+                    reason,
+                )
+                trade = self._build_futures_funding_trade(pos, reason)
+            else:
+                current_spot = spot_prices.get(pos.spot_exchange, {}).get(symbol)
+                current_futures = futures_prices.get(pos.futures_exchange, {}).get(symbol)
+                if current_spot is None or current_futures is None:
+                    continue
+                current_basis_pct = (
+                    (current_futures - current_spot) / current_spot * 100
+                ) if current_spot > 0 else 999.0
+                reason = None
+                if abs(current_basis_pct) < FuturesSpotPosition.CLOSE_THRESHOLD_PERCENT:
+                    reason = f'Базис сошёлся к {current_basis_pct:.4f}%'
+                elif pos.hours_open() >= FuturesSpotPosition.MAX_HOLD_HOURS:
+                    reason = f'Таймаут {FuturesSpotPosition.MAX_HOLD_HOURS}ч'
+                if not reason:
+                    continue
+
+                spot_exchange = self._spot_execution_exchanges.get(pos.spot_exchange)
+                futures_exchange = self._futures_execution_exchanges.get(pos.futures_exchange)
+                if spot_exchange is None or futures_exchange is None:
+                    raise LiveExecutionError(
+                        f'Live close unavailable for route {pos.spot_exchange}->{pos.futures_exchange}'
+                    )
+
+                futures_close = await futures_exchange.create_market_order(
+                    symbol,
+                    'buy',
+                    pos.futures_order_amount,
+                    reduce_only=True,
+                )
+                try:
+                    spot_close = await spot_exchange.create_market_order(symbol, 'sell', pos.spot_order_amount)
+                except Exception as exc:
+                    await self._rollback_futures_close(futures_exchange, symbol, pos.futures_order_amount)
+                    raise LiveExecutionError(str(exc)) from exc
+
+                pos.close(
+                    spot_close.average or current_spot,
+                    futures_close.average or current_futures,
+                    reason,
+                )
+                trade = self._build_futures_spot_trade(pos, reason)
+
+            del self._positions[symbol]
+            await self._open_position_store.delete(symbol)
+            await self._snapshot_repository.delete(symbol)
+            self._portfolio.add_trade(trade)
+            await self._repo.save(trade)
+            await self._analytics.record_closed_trade(
+                build_closed_trade_analytics(trade, self._analytics_timezone)
+            )
+            results.append((pos, trade))
+
+        return results
+
+    async def restore_positions(
+        self,
+        snapshots: list[OpenPositionSnapshot],
+    ) -> list[FuturesSpotPosition | FuturesFundingPosition]:
+        restored: list[FuturesSpotPosition | FuturesFundingPosition] = []
         self._positions.clear()
         for snapshot in snapshots:
-            position = FuturesSpotPosition.from_snapshot(snapshot)
+            if snapshot.strategy == 'futures_funding':
+                position = FuturesFundingPosition.from_snapshot(snapshot)
+            else:
+                position = FuturesSpotPosition.from_snapshot(snapshot)
             self._positions[position.symbol] = position
             await self._open_position_store.save(snapshot)
             restored.append(position)
@@ -519,10 +660,100 @@ class FuturesSpotPositionManager:
         for symbol in stored - current:
             await self._open_position_store.delete(symbol)
 
-    async def _persist_position(self, position: FuturesSpotPosition) -> None:
+    async def _persist_position(self, position: FuturesSpotPosition | FuturesFundingPosition) -> None:
         snapshot = position.to_snapshot()
         await self._open_position_store.save(snapshot)
         await self._snapshot_repository.upsert(snapshot)
+
+    def _funding_close_reason(self, position: FuturesFundingPosition) -> Optional[str]:
+        if position.target_close_at and datetime.now() >= position.target_close_at:
+            return 'Фандинг получен, цикл завершён'
+        if position.hours_open() >= FuturesFundingPosition.MAX_HOLD_HOURS:
+            return f'Таймаут {FuturesFundingPosition.MAX_HOLD_HOURS}ч'
+        return None
+
+    def _build_futures_spot_trade(self, pos: FuturesSpotPosition, reason: str) -> VirtualTrade:
+        entry_basis_profit = (
+            pos.spot_base_quantity * max(pos.entry_futures_price - pos.entry_spot_price, 0.0)
+        ) + (
+            pos.futures_base_quantity * max(pos.entry_spot_price - pos.entry_futures_price, 0.0)
+        )
+        entry_fees = (pos.spot_taker_fee + pos.futures_taker_fee) * pos.position_usdt * 2
+        expected_profit = entry_basis_profit + pos.position_usdt * pos.funding_rate - entry_fees
+        expected_pct = (expected_profit / pos.position_usdt * 100) if pos.position_usdt > 0 else 0.0
+        trade = VirtualTrade(
+            strategy='futures_spot',
+            symbol=pos.symbol,
+            position_size_usdt=pos.position_usdt,
+            expected_profit_usdt=expected_profit,
+            expected_profit_percent=expected_pct,
+            details=FuturesSpotDetails(
+                spot_exchange=pos.spot_exchange,
+                futures_exchange=pos.futures_exchange,
+                symbol=pos.symbol,
+                spot_price=pos.exit_spot_price,
+                futures_price=pos.exit_futures_price,
+                funding_rate=pos.funding_rate,
+                basis=pos.exit_futures_price - pos.exit_spot_price,
+                basis_percent=pos.exit_basis_percent,
+                spot_taker_fee=pos.spot_taker_fee,
+                futures_taker_fee=pos.futures_taker_fee,
+            ),
+        )
+        trade.close(pos.actual_profit_usdt or 0.0, reason)
+        return trade
+
+    def _build_futures_funding_trade(self, pos: FuturesFundingPosition, reason: str) -> VirtualTrade:
+        expected_profit = pos.position_usdt * pos.funding_rate_delta - (
+            (pos.long_taker_fee + pos.short_taker_fee) * pos.position_usdt * 2
+        )
+        expected_pct = (expected_profit / pos.position_usdt * 100) if pos.position_usdt > 0 else 0.0
+        target_funding_time = int(pos.target_close_at.timestamp() * 1000) if pos.target_close_at else 0
+        trade = VirtualTrade(
+            strategy='futures_funding',
+            symbol=pos.symbol,
+            position_size_usdt=pos.position_usdt,
+            expected_profit_usdt=expected_profit,
+            expected_profit_percent=expected_pct,
+            details=FuturesFundingDetails(
+                long_exchange=pos.long_exchange,
+                short_exchange=pos.short_exchange,
+                symbol=pos.symbol,
+                long_price=pos.exit_long_price,
+                short_price=pos.exit_short_price,
+                long_funding_rate=pos.long_funding_rate,
+                short_funding_rate=pos.short_funding_rate,
+                funding_rate_delta=pos.funding_rate_delta,
+                entry_spread_percent=pos.entry_spread_percent,
+                exit_spread_percent=pos.exit_spread_percent,
+                target_funding_time=target_funding_time,
+                long_taker_fee=pos.long_taker_fee,
+                short_taker_fee=pos.short_taker_fee,
+            ),
+        )
+        trade.close(pos.actual_profit_usdt or 0.0, reason)
+        return trade
+
+    async def _prepare_futures_exchange(self, exchange: IExchange, symbol: str) -> None:
+        if self._futures_margin_mode not in {'isolated', 'cross'}:
+            raise LiveExecutionError(
+                f'Unsupported futures margin mode: {self._futures_margin_mode}'
+            )
+        if self._futures_leverage < 1:
+            raise LiveExecutionError(
+                f'Unsupported futures leverage: {self._futures_leverage}'
+            )
+        try:
+            await exchange.prepare_futures_execution(
+                symbol=symbol,
+                leverage=self._futures_leverage,
+                margin_mode=self._futures_margin_mode,
+                one_way=True,
+            )
+        except Exception as exc:
+            raise LiveExecutionError(
+                f'Futures market setup failed for {exchange.info.id} {symbol}: {exc}'
+            ) from exc
 
     async def _rollback_spot_open(self, exchange: IExchange, symbol: str, order) -> None:
         rollback_amount = order.filled or order.amount
@@ -530,6 +761,15 @@ class FuturesSpotPositionManager:
             return
         try:
             await exchange.create_market_order(symbol, 'sell', rollback_amount)
+        except Exception:
+            pass
+
+    async def _rollback_futures_open(self, exchange: IExchange, symbol: str, order, side: str) -> None:
+        rollback_amount = order.filled or order.amount
+        if rollback_amount <= 0:
+            return
+        try:
+            await exchange.create_market_order(symbol, side, rollback_amount, reduce_only=True)
         except Exception:
             pass
 
@@ -542,7 +782,7 @@ class FuturesSpotPositionManager:
             pass
 
     @property
-    def open_positions(self) -> list[FuturesSpotPosition]:
+    def open_positions(self) -> list[FuturesSpotPosition | FuturesFundingPosition]:
         return list(self._positions.values())
 
 
@@ -588,6 +828,25 @@ def build_closed_trade_analytics(trade: VirtualTrade, analytics_timezone: str) -
             expected_profit_percent=trade.expected_profit_percent,
             realized_profit_usdt=trade.actual_profit_usdt or 0.0,
             exchange=details.exchange,
+            opened_at=trade.opened_at,
+            closed_at=closed_at,
+        )
+
+    if trade.strategy == 'futures_funding':
+        details = trade.details
+        assert isinstance(details, FuturesFundingDetails)
+        return ClosedTradeAnalytics(
+            trade_id=trade.id,
+            closed_day=closed_day,
+            strategy=trade.strategy,
+            route_type='cross_exchange',
+            symbol=trade.symbol,
+            position_usdt=trade.position_size_usdt,
+            expected_profit_usdt=trade.expected_profit_usdt,
+            expected_profit_percent=trade.expected_profit_percent,
+            realized_profit_usdt=trade.actual_profit_usdt or 0.0,
+            buy_exchange=details.long_exchange,
+            sell_exchange=details.short_exchange,
             opened_at=trade.opened_at,
             closed_at=closed_at,
         )
