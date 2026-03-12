@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
@@ -22,7 +23,10 @@ from ..domain.ports import (
     FuturesTicker,
 )
 from ..domain.services import ArbitrageDetector
-from ..domain.value_objects import OrderBook
+from ..domain.value_objects import Fee, OrderBook
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -38,6 +42,8 @@ class ScanConfig:
     position_size_usdt: float
     min_profit_percent: float
     triangular_paths: list[TriangularPathConfig]
+    spot_scan_concurrency: int = 6
+    futures_scan_concurrency: int = 4
     enable_cross_exchange: bool = True
     enable_triangular: bool = True
     enable_futures_spot: bool = True
@@ -62,6 +68,7 @@ class ScanOpportunitiesUseCase:
         self._spot = spot_exchanges
         self._futures = futures_exchanges
         self._detector = ArbitrageDetector()
+        self._fee_cache: dict[tuple[str, str], Fee] = {}
 
     async def execute(self, cfg: ScanConfig) -> ScanResult:
         start = datetime.now()
@@ -69,25 +76,45 @@ class ScanOpportunitiesUseCase:
         observed_opportunities: list[ArbitrageOpportunity] = []
         errors: list[str] = []
         exchange_data: list[dict] = []
+        need_order_books = cfg.enable_cross_exchange
+        spot_limit = max(cfg.spot_scan_concurrency, 1)
+        futures_limit = max(cfg.futures_scan_concurrency, 1)
 
         async def load_exchange(exchange: IExchange) -> None:
             books: dict[str, OrderBook] = {}
             tickers: dict[str, Ticker] = {}
+            try:
+                fetched_tickers = await exchange.fetch_tickers(cfg.symbols)
+                tickers.update({ticker.symbol: ticker for ticker in fetched_tickers})
+            except Exception as e:
+                errors.append(f'{exchange.info.id} tickers: {e}')
 
-            async def load_symbol(symbol: str) -> None:
-                try:
-                    book, ticker = await asyncio.gather(
-                        exchange.fetch_order_book(symbol, 20),
-                        exchange.fetch_ticker(symbol),
-                    )
-                    books[symbol] = book
-                    tickers[symbol] = ticker
-                except Exception as e:
-                    errors.append(f'{exchange.info.id} {symbol}: {e}')
+            missing_tickers = [symbol for symbol in cfg.symbols if symbol not in tickers]
+            if missing_tickers:
+                ticker_semaphore = asyncio.Semaphore(spot_limit)
 
-            await asyncio.gather(*[load_symbol(s) for s in cfg.symbols], return_exceptions=True)
+                async def load_ticker(symbol: str) -> None:
+                    async with ticker_semaphore:
+                        try:
+                            tickers[symbol] = await exchange.fetch_ticker(symbol)
+                        except Exception as e:
+                            errors.append(f'{exchange.info.id} ticker {symbol}: {e}')
 
-            if books:
+                await asyncio.gather(*[load_ticker(symbol) for symbol in missing_tickers], return_exceptions=True)
+
+            if need_order_books:
+                book_semaphore = asyncio.Semaphore(spot_limit)
+
+                async def load_book(symbol: str) -> None:
+                    async with book_semaphore:
+                        try:
+                            books[symbol] = await exchange.fetch_order_book(symbol, 20)
+                        except Exception as e:
+                            errors.append(f'{exchange.info.id} book {symbol}: {e}')
+
+                await asyncio.gather(*[load_book(symbol) for symbol in cfg.symbols], return_exceptions=True)
+
+            if books or tickers:
                 exchange_data.append({
                     'exchange_id': exchange.info.id,
                     'fee': exchange.info.fee,
@@ -96,11 +123,13 @@ class ScanOpportunitiesUseCase:
                 })
 
         await asyncio.gather(*[load_exchange(ex) for ex in self._spot], return_exceptions=True)
+        spot_loaded_at = datetime.now()
 
         spot_prices: dict[str, dict[str, float]] = {
             d['exchange_id']: {s: t.last for s, t in d['tickers'].items()}
             for d in exchange_data
         }
+        exchange_data_by_id = {data['exchange_id']: data for data in exchange_data}
 
         if cfg.enable_cross_exchange and len(exchange_data) >= 2:
             for symbol in cfg.symbols:
@@ -126,30 +155,98 @@ class ScanOpportunitiesUseCase:
                 )
                 opportunities.extend(found)
                 observed_opportunities.extend(found)
+        spot_detected_at = datetime.now()
 
         futures_prices: dict[str, dict[str, float]] = {}
         futures_funding: dict[str, dict[str, float]] = {}
+        futures_tickers_cache: dict[str, dict[str, FuturesTicker]] = {}
+        spot_fee_cache: dict[tuple[str, str], Fee] = {}
+        futures_fee_cache: dict[tuple[str, str], Fee] = {}
 
-        if cfg.enable_futures_spot and self._futures:
-            futures_tickers_cache: dict[str, dict[str, FuturesTicker]] = {}
-            for futures_ex in self._futures:
+        if (cfg.enable_futures_spot or cfg.enable_futures_funding) and self._futures:
+            async def load_futures_exchange(futures_ex: IExchange) -> None:
                 cache: dict[str, FuturesTicker] = {}
-                for symbol in cfg.symbols:
-                    try:
-                        ft = await futures_ex.fetch_futures_ticker(symbol)
-                        if ft:
-                            cache[symbol] = ft
-                    except Exception as e:
-                        errors.append(f'futures {futures_ex.info.id} {symbol}: {e}')
+                try:
+                    fetched_tickers = await futures_ex.fetch_futures_tickers(cfg.symbols)
+                    cache.update({ticker.symbol: ticker for ticker in fetched_tickers})
+                except Exception as e:
+                    errors.append(f'futures {futures_ex.info.id} tickers: {e}')
+
+                missing_symbols = [symbol for symbol in cfg.symbols if symbol not in cache]
+                if missing_symbols:
+                    futures_semaphore = asyncio.Semaphore(futures_limit)
+
+                    async def load_symbol(symbol: str) -> None:
+                        async with futures_semaphore:
+                            try:
+                                ft = await futures_ex.fetch_futures_ticker(symbol)
+                                if ft:
+                                    cache[symbol] = ft
+                            except Exception as e:
+                                errors.append(f'futures {futures_ex.info.id} {symbol}: {e}')
+
+                    await asyncio.gather(*[load_symbol(symbol) for symbol in missing_symbols], return_exceptions=True)
                 if cache:
                     futures_tickers_cache[futures_ex.info.id] = cache
                     futures_prices[futures_ex.info.id] = {s: ft.last for s, ft in cache.items()}
                     futures_funding[futures_ex.info.id] = {s: ft.funding_rate for s, ft in cache.items()}
 
+            await asyncio.gather(*[load_futures_exchange(ex) for ex in self._futures], return_exceptions=True)
+            futures_loaded_at = datetime.now()
+
+            async def load_fee_cache(
+                exchange: IExchange,
+                symbols: list[str],
+                target: dict[tuple[str, str], Fee],
+                prefix: str,
+            ) -> None:
+                fee_semaphore = asyncio.Semaphore(spot_limit)
+
+                async def load_symbol_fee(symbol: str) -> None:
+                    cache_key = (exchange.info.id, symbol)
+                    cached_fee = self._fee_cache.get(cache_key)
+                    if cached_fee is not None:
+                        target[cache_key] = cached_fee
+                        return
+                    async with fee_semaphore:
+                        try:
+                            fee = await exchange.get_trading_fee(symbol)
+                            target[cache_key] = fee
+                            self._fee_cache[cache_key] = fee
+                        except Exception as e:
+                            errors.append(f'{prefix} {exchange.info.id} {symbol}: {e}')
+
+                await asyncio.gather(*[load_symbol_fee(symbol) for symbol in symbols], return_exceptions=True)
+
+            await asyncio.gather(
+                *[
+                    load_fee_cache(
+                        spot_ex,
+                        [symbol for symbol in cfg.symbols if symbol in exchange_data_by_id.get(spot_ex.info.id, {}).get('tickers', {})],
+                        spot_fee_cache,
+                        'spot-fee',
+                    )
+                    for spot_ex in self._spot
+                    if spot_ex.info.id in exchange_data_by_id
+                ],
+                *[
+                    load_fee_cache(
+                        futures_ex,
+                        list(futures_tickers_cache.get(futures_ex.info.id, {})),
+                        futures_fee_cache,
+                        'futures-fee',
+                    )
+                    for futures_ex in self._futures
+                    if futures_ex.info.id in futures_tickers_cache
+                ],
+                return_exceptions=True,
+            )
+            fees_loaded_at = datetime.now()
+
             best_per_symbol: dict[str, ArbitrageOpportunity] = {}
 
             for spot_ex in self._spot:
-                spot_data = next((d for d in exchange_data if d['exchange_id'] == spot_ex.info.id), None)
+                spot_data = exchange_data_by_id.get(spot_ex.info.id)
                 if not spot_data:
                     continue
 
@@ -162,8 +259,8 @@ class ScanOpportunitiesUseCase:
                         if not spot_ticker or not futures_ticker:
                             continue
                         try:
-                            spot_fee = await spot_ex.get_trading_fee(symbol)
-                            futures_fee = await futures_ex.get_trading_fee(symbol)
+                            spot_fee = spot_fee_cache.get((spot_ex.info.id, symbol), spot_ex.info.fee)
+                            futures_fee = futures_fee_cache.get((futures_ex.info.id, symbol), futures_ex.info.fee)
                             opp = self._detector.detect_futures_spot(
                                 spot_ex.info.id,
                                 futures_ex.info.id,
@@ -205,8 +302,8 @@ class ScanOpportunitiesUseCase:
                             if not long_ticker or not short_ticker:
                                 continue
                             try:
-                                long_fee = await long_ex.get_trading_fee(symbol)
-                                short_fee = await short_ex.get_trading_fee(symbol)
+                                long_fee = futures_fee_cache.get((long_ex.info.id, symbol), long_ex.info.fee)
+                                short_fee = futures_fee_cache.get((short_ex.info.id, symbol), short_ex.info.fee)
                                 opp = self._detector.detect_futures_funding(
                                     long_ex.info.id,
                                     short_ex.info.id,
@@ -227,10 +324,27 @@ class ScanOpportunitiesUseCase:
                                 errors.append(f'futures-funding {long_ex.info.id}×{short_ex.info.id} {symbol}: {e}')
 
                 opportunities.extend(best_funding_per_symbol.values())
+            futures_detected_at = datetime.now()
+        else:
+            futures_loaded_at = spot_detected_at
+            fees_loaded_at = futures_loaded_at
+            futures_detected_at = fees_loaded_at
 
         opportunities.sort(key=lambda o: o.profit_percent, reverse=True)
 
         duration = int((datetime.now() - start).total_seconds() * 1000)
+        logger.info(
+            'scan_timing total_ms=%s spot_load_ms=%s spot_detect_ms=%s futures_load_ms=%s fee_load_ms=%s futures_detect_ms=%s opportunities=%s observed=%s errors=%s',
+            duration,
+            int((spot_loaded_at - start).total_seconds() * 1000),
+            int((spot_detected_at - spot_loaded_at).total_seconds() * 1000),
+            int((futures_loaded_at - spot_detected_at).total_seconds() * 1000),
+            int((fees_loaded_at - futures_loaded_at).total_seconds() * 1000),
+            int((futures_detected_at - fees_loaded_at).total_seconds() * 1000),
+            len(opportunities),
+            len(observed_opportunities),
+            len(errors),
+        )
         return ScanResult(
             opportunities=opportunities,
             observed_opportunities=observed_opportunities,

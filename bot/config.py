@@ -27,6 +27,8 @@ class AppConfig:
     scan_interval_ms: int
     min_profit_percent: float
     max_position_usdt: float
+    spot_scan_concurrency: int
+    futures_scan_concurrency: int
     futures_leverage: int
     futures_margin_mode: str
     metrics_enabled: bool
@@ -56,6 +58,8 @@ config = AppConfig(
     scan_interval_ms=int(os.getenv('SCAN_INTERVAL_MS', '3000')),
     min_profit_percent=float(os.getenv('MIN_PROFIT_PERCENT', '0.1')),
     max_position_usdt=float(os.getenv('MAX_POSITION_USDT', '100')),
+    spot_scan_concurrency=int(os.getenv('SPOT_SCAN_CONCURRENCY', '6')),
+    futures_scan_concurrency=int(os.getenv('FUTURES_SCAN_CONCURRENCY', '4')),
     futures_leverage=int(os.getenv('FUTURES_LEVERAGE', '5')),
     futures_margin_mode=os.getenv('FUTURES_MARGIN_MODE', 'isolated').lower(),
     metrics_enabled=os.getenv('METRICS_ENABLED', 'true').lower() != 'false',

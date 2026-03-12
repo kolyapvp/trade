@@ -63,6 +63,10 @@ async def bootstrap() -> None:
     dashboard.print_info(f'Интервал сканирования: {config.scan_interval_ms}мс')
     dashboard.print_info(f'Мин. прибыль: {config.min_profit_percent}%')
     dashboard.print_info(f'Макс. позиция: ${config.max_position_usdt}')
+    dashboard.print_info(
+        f'Параллельность сканирования: spot x{config.spot_scan_concurrency} | '
+        f'futures x{config.futures_scan_concurrency}'
+    )
     dashboard.print_info(f'Фьючерсы: {config.futures_margin_mode} | плечо {config.futures_leverage}x')
     dashboard.print_info(
         f'Метрики: {"включены" if config.metrics_enabled else "выключены"}'
@@ -207,6 +211,8 @@ async def bootstrap() -> None:
             position_size_usdt=config.max_position_usdt,
             min_profit_percent=config.min_profit_percent,
             triangular_paths=TRIANGULAR_PATHS,
+            spot_scan_concurrency=config.spot_scan_concurrency,
+            futures_scan_concurrency=config.futures_scan_concurrency,
             enable_cross_exchange=config.strategies.get('cross_exchange', True),
             enable_triangular=config.strategies.get('triangular', True),
             enable_futures_spot=config.strategies.get('futures_spot', True),

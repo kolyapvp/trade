@@ -72,6 +72,10 @@ class IExchange(abc.ABC):
         ...
 
     @abc.abstractmethod
+    async def fetch_futures_tickers(self, symbols: list[str]) -> list[FuturesTicker]:
+        ...
+
+    @abc.abstractmethod
     async def fetch_free_balance(self, currency: str) -> float:
         ...
 

@@ -93,43 +93,47 @@ class CcxtExchangeAdapter(IExchange):
             return None
         try:
             market_symbol, raw = await self._call_exchange_method('fetch_ticker', symbol)
-            funding = None
-            try:
-                funding = await self._exchange.fetch_funding_rate(market_symbol)
-            except Exception:
-                pass
-
-            funding_rate = 0.0
-            next_funding = 0
-            if funding:
-                funding_rate = funding.get('fundingRate') or 0.0
-                raw_next_funding = (
-                    funding.get('nextFundingTimestamp')
-                    or funding.get('nextFundingDatetime')
-                    or funding.get('nextFundingTime')
-                    or 0
-                )
-                if isinstance(raw_next_funding, str):
-                    next_funding = self._exchange.parse8601(raw_next_funding) or 0
-                else:
-                    next_funding = int(raw_next_funding or 0)
-
-            info = raw.get('info') or {}
-            return FuturesTicker(
-                symbol=market_symbol,
-                exchange_id=self.info.id,
-                bid=raw.get('bid') or 0.0,
-                ask=raw.get('ask') or 0.0,
-                last=raw.get('last') or 0.0,
-                volume=raw.get('baseVolume') or 0.0,
-                timestamp=raw.get('timestamp') or 0,
-                funding_rate=funding_rate,
-                next_funding_time=next_funding,
-                mark_price=float(info.get('markPrice') or raw.get('last') or 0),
-                index_price=float(info.get('indexPrice') or raw.get('last') or 0),
-            )
+            funding = await self._fetch_funding_rate(market_symbol)
+            return self._build_futures_ticker(symbol, market_symbol, raw, funding)
         except Exception:
             return None
+
+    async def fetch_futures_tickers(self, symbols: list[str]) -> list[FuturesTicker]:
+        if not self.info.supports_futures:
+            return []
+
+        spot_like_tickers = await self.fetch_tickers(symbols)
+        ticker_map = {ticker.symbol: ticker for ticker in spot_like_tickers}
+        funding_map: dict[str, dict] = {}
+        funding_semaphore = asyncio.Semaphore(min(max(len(symbols), 1), 4))
+
+        async def load_funding(symbol: str) -> None:
+            async with funding_semaphore:
+                market_symbol = await self._prepare_symbol(symbol)
+                funding = await self._fetch_funding_rate(market_symbol)
+                if funding:
+                    funding_map[symbol] = funding
+
+        await asyncio.gather(*[load_funding(symbol) for symbol in symbols], return_exceptions=True)
+
+        result: list[FuturesTicker] = []
+        for symbol in symbols:
+            ticker = ticker_map.get(symbol)
+            if ticker is None:
+                single = await self.fetch_futures_ticker(symbol)
+                if single is not None:
+                    result.append(single)
+                continue
+            raw = {
+                'bid': ticker.bid,
+                'ask': ticker.ask,
+                'last': ticker.last,
+                'baseVolume': ticker.volume,
+                'timestamp': ticker.timestamp,
+                'info': {},
+            }
+            result.append(self._build_futures_ticker(symbol, symbol, raw, funding_map.get(symbol)))
+        return result
 
     async def fetch_free_balance(self, currency: str) -> float:
         balance = await self._exchange.fetch_balance()
@@ -333,6 +337,51 @@ class CcxtExchangeAdapter(IExchange):
             'leverage': leverage,
             'margin_mode': margin_mode,
         }
+
+    async def _fetch_funding_rate(self, market_symbol: str) -> dict | None:
+        try:
+            return await self._exchange.fetch_funding_rate(market_symbol)
+        except Exception:
+            return None
+
+    def _build_futures_ticker(
+        self,
+        requested_symbol: str,
+        market_symbol: str,
+        raw: dict,
+        funding: dict | None,
+    ) -> FuturesTicker:
+        funding_rate = 0.0
+        next_funding = 0
+        if funding:
+            funding_rate = funding.get('fundingRate') or 0.0
+            next_funding = self._parse_next_funding_time(funding)
+
+        info = raw.get('info') or {}
+        return FuturesTicker(
+            symbol=requested_symbol,
+            exchange_id=self.info.id,
+            bid=raw.get('bid') or 0.0,
+            ask=raw.get('ask') or 0.0,
+            last=raw.get('last') or 0.0,
+            volume=raw.get('baseVolume') or 0.0,
+            timestamp=raw.get('timestamp') or 0,
+            funding_rate=funding_rate,
+            next_funding_time=next_funding,
+            mark_price=float(info.get('markPrice') or raw.get('last') or 0),
+            index_price=float(info.get('indexPrice') or raw.get('last') or 0),
+        )
+
+    def _parse_next_funding_time(self, funding: dict) -> int:
+        raw_next_funding = (
+            funding.get('nextFundingTimestamp')
+            or funding.get('nextFundingDatetime')
+            or funding.get('nextFundingTime')
+            or 0
+        )
+        if isinstance(raw_next_funding, str):
+            return self._exchange.parse8601(raw_next_funding) or 0
+        return int(raw_next_funding or 0)
 
     async def _apply_futures_setting(self, operation) -> None:
         try:
