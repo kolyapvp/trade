@@ -42,6 +42,8 @@ class AppConfig:
     exchanges: dict[str, ExchangeCredentials]
     telegram: TelegramConfig
     pairs: list[str]
+    spot_exchange_allowlist: list[str]
+    futures_exchange_allowlist: list[str]
     strategies: dict[str, bool]
     futures_spot_long_only: bool
 
@@ -51,6 +53,21 @@ def _mode_from_args() -> str | None:
         if arg.startswith('--mode='):
             return arg.split('=', 1)[1]
     return None
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.lower() not in {'0', 'false', 'no', 'off'}
+
+
+def _env_csv(name: str, default: list[str]) -> list[str]:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    values = [item.strip().lower() for item in raw.split(',')]
+    return [item for item in values if item]
 
 
 config = AppConfig(
@@ -119,11 +136,19 @@ config = AppConfig(
         'ARB/USDT', 'OP/USDT', 'POL/USDT', 'FIL/USDT',
         'NEAR/USDT', 'INJ/USDT',
     ],
+    spot_exchange_allowlist=_env_csv(
+        'SPOT_EXCHANGE_ALLOWLIST',
+        ['binance', 'bybit', 'okx', 'kucoin', 'gateio', 'mexc', 'bitget', 'htx'],
+    ),
+    futures_exchange_allowlist=_env_csv(
+        'FUTURES_EXCHANGE_ALLOWLIST',
+        ['binance', 'bybit', 'okx', 'kucoin', 'gateio', 'mexc', 'bitget', 'htx'],
+    ),
     strategies={
-        'cross_exchange': False,
-        'triangular': False,
-        'futures_spot': True,
-        'futures_funding': True,
+        'cross_exchange': _env_bool('ENABLE_CROSS_EXCHANGE', False),
+        'triangular': _env_bool('ENABLE_TRIANGULAR', False),
+        'futures_spot': _env_bool('ENABLE_FUTURES_SPOT', True),
+        'futures_funding': _env_bool('ENABLE_FUTURES_FUNDING', True),
     },
     futures_spot_long_only=os.getenv('FUTURES_SPOT_LONG_ONLY', 'true').lower() != 'false',
 )

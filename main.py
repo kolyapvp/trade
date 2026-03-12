@@ -67,6 +67,8 @@ async def bootstrap() -> None:
         f'Параллельность сканирования: spot x{config.spot_scan_concurrency} | '
         f'futures x{config.futures_scan_concurrency}'
     )
+    dashboard.print_info(f'Spot allowlist: {", ".join(config.spot_exchange_allowlist)}')
+    dashboard.print_info(f'Futures allowlist: {", ".join(config.futures_exchange_allowlist)}')
     dashboard.print_info(f'Фьючерсы: {config.futures_margin_mode} | плечо {config.futures_leverage}x')
     dashboard.print_info(
         f'Метрики: {"включены" if config.metrics_enabled else "выключены"}'
@@ -128,6 +130,10 @@ async def bootstrap() -> None:
             factory.create_bitget(creds_or_none('bitget')),
             factory.create_htx(creds_or_none('htx')),
         ]
+        spot_exchanges = [
+            exchange for exchange in spot_exchanges
+            if exchange.info.id in config.spot_exchange_allowlist
+        ]
 
         futures_exchanges = [
             factory.create_binance_futures(creds_or_none('binance')),
@@ -138,6 +144,10 @@ async def bootstrap() -> None:
             factory.create_mexc_futures(creds_or_none('mexc')),
             factory.create_bitget_futures(creds_or_none('bitget')),
             factory.create_htx_futures(creds_or_none('htx')),
+        ]
+        futures_exchanges = [
+            exchange for exchange in futures_exchanges
+            if exchange.info.id in config.futures_exchange_allowlist
         ]
 
         all_exchanges = spot_exchanges + futures_exchanges
@@ -188,6 +198,22 @@ async def bootstrap() -> None:
             live_futures_labels = ', '.join(sorted(live_futures_exchange_map)) or 'нет'
             dashboard.print_info(f'Live spot API: {live_spot_labels}')
             dashboard.print_info(f'Live futures API: {live_futures_labels}')
+            missing_spot_live = [
+                exchange_id for exchange_id in config.spot_exchange_allowlist
+                if exchange_id not in live_spot_exchange_map
+            ]
+            missing_futures_live = [
+                exchange_id for exchange_id in config.futures_exchange_allowlist
+                if exchange_id not in live_futures_exchange_map
+            ]
+            if missing_spot_live:
+                dashboard.print_error(
+                    f'Для live spot не хватает API-ключей: {", ".join(missing_spot_live)}'
+                )
+            if missing_futures_live:
+                dashboard.print_error(
+                    f'Для live futures не хватает API-ключей: {", ".join(missing_futures_live)}'
+                )
 
         alert_service = None
         if config.telegram.bot_token and config.telegram.chat_id:
