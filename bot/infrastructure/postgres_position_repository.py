@@ -85,7 +85,7 @@ class PostgresOpenPositionSnapshotRepository(IOpenPositionSnapshotRepository):
                 target_close_at,
                 updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW())
             ON CONFLICT (symbol) DO UPDATE SET
                 position_id = EXCLUDED.position_id,
                 strategy = EXCLUDED.strategy,
@@ -158,7 +158,7 @@ class PostgresOpenPositionSnapshotRepository(IOpenPositionSnapshotRepository):
                         target_close_at,
                         updated_at
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, NOW())
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW())
                     ''',
                     [
                         (
