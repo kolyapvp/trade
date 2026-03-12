@@ -412,9 +412,15 @@ class CcxtExchangeAdapter(IExchange):
         await self._ensure_markets_loaded()
 
         resolved = symbol
-        if symbol not in self._exchange.markets:
+        initial_market = self._exchange.markets.get(symbol)
+        needs_market_lookup = (
+            initial_market is None
+            or bool(initial_market.get('contract')) != self.info.supports_futures
+        )
+        if needs_market_lookup:
             for alias in SYMBOL_ALIASES.get(symbol, ()):
-                if alias in self._exchange.markets:
+                alias_market = self._exchange.markets.get(alias)
+                if alias_market and bool(alias_market.get('contract')) == self.info.supports_futures:
                     resolved = alias
                     break
             if resolved == symbol:

@@ -590,26 +590,35 @@
   "templating": {
     "list": [
       {
-        "allValue": "All",
         "current": {
           "selected": true,
           "text": "All",
           "value": "All"
         },
-        "datasource": {
-          "type": "postgres",
-          "uid": "trade-postgres"
-        },
-        "definition": "SELECT DISTINCT mode FROM trade_daily_profit ORDER BY 1",
         "hide": 0,
-        "includeAll": true,
+        "includeAll": false,
         "label": "Mode",
         "multi": false,
         "name": "mode",
-        "options": [],
-        "query": "SELECT DISTINCT mode FROM trade_daily_profit ORDER BY 1",
-        "refresh": 1,
-        "type": "query"
+        "options": [
+          {
+            "selected": true,
+            "text": "All",
+            "value": "All"
+          },
+          {
+            "selected": false,
+            "text": "demo",
+            "value": "demo"
+          },
+          {
+            "selected": false,
+            "text": "real",
+            "value": "real"
+          }
+        ],
+        "query": "All,demo,real",
+        "type": "custom"
       },
       {
         "allValue": "All",

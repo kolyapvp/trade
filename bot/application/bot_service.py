@@ -439,83 +439,91 @@ class ArbitrageBotService:
             for opp in result.opportunities:
                 if not opp.is_profitable(self._scan_config.min_profit_percent):
                     continue
-
-                if opp.strategy in {'futures_spot', 'futures_funding'}:
-                    if self._position_manager.has_open_position(opp.symbol):
-                        continue
-                    if self._mode == 'demo':
-                        await self._position_manager.open_position(opp)
-                        self._metrics.set_open_positions(len(self._position_manager.open_positions))
-                        if self._on_opportunity:
-                            self._on_opportunity(opp, None)
-                        if self._alert_service:
-                            alert = TradeAlert(
-                                strategy=opp.strategy,
-                                symbol=opp.symbol,
-                                mode=self._mode,
-                                profit_percent=opp.profit_percent,
-                                profit_usdt=opp.profit_usdt,
-                                position_usdt=opp.position_size_usdt,
-                                details=self._build_alert_details(opp),
-                                workflow=self._build_workflow(opp),
-                                profit_last_hour=self._portfolio.profit_last_hour(),
-                                profit_last_24h=self._portfolio.profit_last_24h(),
-                                timestamp=datetime.now(),
-                                alert_type='opened',
-                            )
-                            asyncio.create_task(self._alert_service.send_trade_alert(alert))
-                    elif self._can_execute_live(opp):
-                        await self._position_manager.open_live_position(opp)
-                        self._metrics.set_open_positions(len(self._position_manager.open_positions))
-                        if self._on_opportunity:
-                            self._on_opportunity(opp, None)
-                        if self._alert_service:
-                            alert = TradeAlert(
-                                strategy=opp.strategy,
-                                symbol=opp.symbol,
-                                mode=self._mode,
-                                profit_percent=opp.profit_percent,
-                                profit_usdt=opp.profit_usdt,
-                                position_usdt=opp.position_size_usdt,
-                                details=self._build_alert_details(opp),
-                                workflow=self._build_workflow(opp),
-                                profit_last_hour=self._portfolio.profit_last_hour(),
-                                profit_last_24h=self._portfolio.profit_last_24h(),
-                                timestamp=datetime.now(),
-                                alert_type='opened',
-                            )
-                            asyncio.create_task(self._alert_service.send_trade_alert(alert))
-                else:
-                    if self._mode == 'demo':
-                        trade = await self._executor.execute(opp)
-                        self._stats.total_trades_executed += 1
-                        self._metrics.record_trade(self._build_trade_telemetry(
-                            strategy=trade.strategy,
-                            symbol=trade.symbol,
-                            expected_profit_usdt=trade.expected_profit_usdt,
-                            expected_profit_percent=trade.expected_profit_percent,
-                            realized_profit_usdt=trade.actual_profit_usdt or 0.0,
-                            position_usdt=trade.position_size_usdt,
-                            details=trade.details,
-                        ))
-                        if self._on_opportunity:
-                            self._on_opportunity(opp, trade)
-                        if self._alert_service:
-                            alert = TradeAlert(
-                                strategy=opp.strategy,
-                                symbol=opp.symbol,
-                                mode=self._mode,
-                                profit_percent=opp.profit_percent,
-                                profit_usdt=trade.actual_profit_usdt or opp.profit_usdt,
-                                position_usdt=opp.position_size_usdt,
-                                details=self._build_alert_details(opp),
-                                workflow=self._build_workflow(opp),
-                                profit_last_hour=self._portfolio.profit_last_hour(),
-                                profit_last_24h=self._portfolio.profit_last_24h(),
-                                timestamp=datetime.now(),
-                                alert_type='opened',
-                            )
-                            asyncio.create_task(self._alert_service.send_trade_alert(alert))
+                try:
+                    if opp.strategy in {'futures_spot', 'futures_funding'}:
+                        if self._position_manager.has_open_position(opp.symbol):
+                            continue
+                        if self._mode == 'demo':
+                            await self._position_manager.open_position(opp)
+                            self._metrics.set_open_positions(len(self._position_manager.open_positions))
+                            if self._on_opportunity:
+                                self._on_opportunity(opp, None)
+                            if self._alert_service:
+                                alert = TradeAlert(
+                                    strategy=opp.strategy,
+                                    symbol=opp.symbol,
+                                    mode=self._mode,
+                                    profit_percent=opp.profit_percent,
+                                    profit_usdt=opp.profit_usdt,
+                                    position_usdt=opp.position_size_usdt,
+                                    details=self._build_alert_details(opp),
+                                    workflow=self._build_workflow(opp),
+                                    profit_last_hour=self._portfolio.profit_last_hour(),
+                                    profit_last_24h=self._portfolio.profit_last_24h(),
+                                    timestamp=datetime.now(),
+                                    alert_type='opened',
+                                )
+                                asyncio.create_task(self._alert_service.send_trade_alert(alert))
+                        elif self._can_execute_live(opp):
+                            await self._position_manager.open_live_position(opp)
+                            self._metrics.set_open_positions(len(self._position_manager.open_positions))
+                            if self._on_opportunity:
+                                self._on_opportunity(opp, None)
+                            if self._alert_service:
+                                alert = TradeAlert(
+                                    strategy=opp.strategy,
+                                    symbol=opp.symbol,
+                                    mode=self._mode,
+                                    profit_percent=opp.profit_percent,
+                                    profit_usdt=opp.profit_usdt,
+                                    position_usdt=opp.position_size_usdt,
+                                    details=self._build_alert_details(opp),
+                                    workflow=self._build_workflow(opp),
+                                    profit_last_hour=self._portfolio.profit_last_hour(),
+                                    profit_last_24h=self._portfolio.profit_last_24h(),
+                                    timestamp=datetime.now(),
+                                    alert_type='opened',
+                                )
+                                asyncio.create_task(self._alert_service.send_trade_alert(alert))
+                    else:
+                        if self._mode == 'demo':
+                            trade = await self._executor.execute(opp)
+                            self._stats.total_trades_executed += 1
+                            self._metrics.record_trade(self._build_trade_telemetry(
+                                strategy=trade.strategy,
+                                symbol=trade.symbol,
+                                expected_profit_usdt=trade.expected_profit_usdt,
+                                expected_profit_percent=trade.expected_profit_percent,
+                                realized_profit_usdt=trade.actual_profit_usdt or 0.0,
+                                position_usdt=trade.position_size_usdt,
+                                details=trade.details,
+                            ))
+                            if self._on_opportunity:
+                                self._on_opportunity(opp, trade)
+                            if self._alert_service:
+                                alert = TradeAlert(
+                                    strategy=opp.strategy,
+                                    symbol=opp.symbol,
+                                    mode=self._mode,
+                                    profit_percent=opp.profit_percent,
+                                    profit_usdt=trade.actual_profit_usdt or opp.profit_usdt,
+                                    position_usdt=opp.position_size_usdt,
+                                    details=self._build_alert_details(opp),
+                                    workflow=self._build_workflow(opp),
+                                    profit_last_hour=self._portfolio.profit_last_hour(),
+                                    profit_last_24h=self._portfolio.profit_last_24h(),
+                                    timestamp=datetime.now(),
+                                    alert_type='opened',
+                                )
+                                asyncio.create_task(self._alert_service.send_trade_alert(alert))
+                except LiveExecutionError as e:
+                    msg = f'Live execution error: {e}'
+                    self._stats.errors.append(msg)
+                    logger.exception(msg)
+                    self._metrics.record_error('live_execution')
+                    if self._on_error:
+                        self._on_error(msg)
+                    continue
 
         except LiveExecutionError as e:
             msg = f'Live execution error: {e}'

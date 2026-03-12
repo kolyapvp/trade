@@ -612,32 +612,36 @@
   "templating": {
     "list": [
       {
-        "allValue": ".+",
         "current": {
           "selected": true,
           "text": "All",
-          "value": "$__all"
+          "value": ".*"
         },
-        "datasource": {
-          "type": "prometheus",
-          "uid": "prometheus"
-        },
-        "definition": "label_values(tradebot_scan_total, mode)",
         "hide": 0,
-        "includeAll": true,
+        "includeAll": false,
         "label": "Mode",
         "multi": false,
         "name": "mode",
-        "options": [],
-        "query": {
-          "qryType": 1,
-          "query": "label_values(tradebot_scan_total, mode)",
-          "refId": "PrometheusVariableQueryEditor-Mode"
-        },
-        "refresh": 1,
-        "regex": "",
+        "options": [
+          {
+            "selected": true,
+            "text": "All",
+            "value": ".*"
+          },
+          {
+            "selected": false,
+            "text": "demo",
+            "value": "demo|"
+          },
+          {
+            "selected": false,
+            "text": "real",
+            "value": "real"
+          }
+        ],
+        "query": "All : .*, demo : demo|, real : real",
         "sort": 1,
-        "type": "query"
+        "type": "custom"
       }
     ]
   },
