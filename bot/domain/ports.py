@@ -199,6 +199,18 @@ class TradeTelemetry:
     futures_exchange: str = ''
 
 
+@dataclass(frozen=True)
+class DeploymentState:
+    status: str = 'active'
+    target_sha: str = ''
+    requested_at: Optional[datetime] = None
+    requested_by: str = ''
+
+    @property
+    def is_draining(self) -> bool:
+        return self.status == 'draining'
+
+
 class IMetricsService(abc.ABC):
     @abc.abstractmethod
     def start(self) -> None:
@@ -244,6 +256,12 @@ class IOpenPositionStore(abc.ABC):
 
     @abc.abstractmethod
     async def close(self) -> None:
+        ...
+
+
+class IDeploymentStateRepository(abc.ABC):
+    @abc.abstractmethod
+    async def get_state(self) -> DeploymentState:
         ...
 
 

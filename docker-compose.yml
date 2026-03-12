@@ -5,8 +5,6 @@ services:
     command: ['redis-server', '--appendonly', 'yes']
     volumes:
       - redis-data:/data
-    ports:
-      - '${REDIS_HOST_PORT:-6380}:6379'
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 10s
@@ -49,6 +47,18 @@ services:
       - '9108'
     ports:
       - '${BOT_METRICS_HOST_PORT:-9108}:9108'
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'python',
+          '-c',
+          'import urllib.request; urllib.request.urlopen("http://127.0.0.1:9108/metrics", timeout=3)',
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
     stop_grace_period: 2m
     depends_on:
       redis:

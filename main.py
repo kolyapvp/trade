@@ -25,6 +25,7 @@ from bot.infrastructure.logging_setup import configure_file_logging
 from bot.infrastructure.metrics_service import NullMetricsService, PrometheusMetricsService
 from bot.infrastructure.postgres_position_repository import PostgresOpenPositionSnapshotRepository
 from bot.infrastructure.postgres_trade_analytics_repository import PostgresTradeAnalyticsRepository
+from bot.infrastructure.redis_deployment_repository import RedisDeploymentStateRepository
 from bot.infrastructure.redis_trade_repository import RedisOpenPositionStore, RedisTradeRepository
 from bot.infrastructure.telegram_service import TelegramAlertService
 from bot.presentation.dashboard import Dashboard
@@ -96,6 +97,7 @@ async def bootstrap() -> None:
         )
         trade_repository = RedisTradeRepository(redis_client)
         open_position_store = RedisOpenPositionStore(redis_client)
+        deployment_state_repository = RedisDeploymentStateRepository(redis_client)
         snapshot_repository = PostgresOpenPositionSnapshotRepository(postgres_pool)
         analytics_repository = PostgresTradeAnalyticsRepository(postgres_pool)
         await redis_client.ping()
@@ -283,6 +285,7 @@ async def bootstrap() -> None:
             scan_interval_ms=config.scan_interval_ms,
             position_manager=position_manager,
             metrics_service=metrics_service,
+            deployment_state_repository=deployment_state_repository,
             alert_service=alert_service,
             live_spot_exchange_ids=set(live_spot_exchange_map),
             live_futures_exchange_ids=set(live_futures_exchange_map),

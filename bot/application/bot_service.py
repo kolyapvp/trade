@@ -13,7 +13,9 @@ from .use_cases import (
 from ..domain.entities import ArbitrageOpportunity, VirtualTrade, Portfolio, FuturesSpotPosition, FuturesFundingPosition
 from ..domain.entities import CrossExchangeDetails, TriangularDetails, FuturesSpotDetails, FuturesFundingDetails
 from ..domain.ports import (
+    DeploymentState,
     IAlertService,
+    IDeploymentStateRepository,
     IMetricsService,
     ScanTelemetry,
     SignalTelemetry,
@@ -33,6 +35,7 @@ class BotStats:
     total_opportunities_found: int = 0
     total_trades_executed: int = 0
     open_positions_count: int = 0
+    deployment_status: str = 'active'
     errors: list[str] = field(default_factory=list)
 
 
@@ -48,6 +51,7 @@ class ArbitrageBotService:
         scan_interval_ms: int,
         position_manager: FuturesSpotPositionManager,
         metrics_service: IMetricsService,
+        deployment_state_repository: IDeploymentStateRepository,
         alert_service: Optional[IAlertService] = None,
         live_spot_exchange_ids: Optional[set[str]] = None,
         live_futures_exchange_ids: Optional[set[str]] = None,
@@ -61,6 +65,7 @@ class ArbitrageBotService:
         self._scan_interval_ms = scan_interval_ms
         self._position_manager = position_manager
         self._metrics = metrics_service
+        self._deployment_state_repository = deployment_state_repository
         self._alert_service = alert_service
         self._live_spot_exchange_ids = live_spot_exchange_ids or set()
         self._live_futures_exchange_ids = live_futures_exchange_ids or set()
@@ -70,6 +75,7 @@ class ArbitrageBotService:
         self._on_scan: Optional[Callable] = None
         self._on_error: Optional[Callable] = None
         self._on_position_closed: Optional[Callable] = None
+        self._deployment_state = DeploymentState()
 
     def set_opportunity_handler(self, handler: Callable) -> None:
         self._on_opportunity = handler
@@ -92,6 +98,7 @@ class ArbitrageBotService:
             total_opportunities_found=self._stats.total_opportunities_found,
             total_trades_executed=self._stats.total_trades_executed,
             open_positions_count=len(self._position_manager.open_positions),
+            deployment_status=self._deployment_state.status,
             errors=list(self._stats.errors),
         )
 
@@ -345,8 +352,39 @@ class ArbitrageBotService:
                 f'4️⃣ Позиция будет закрыта ботом автоматически при схождении базиса',
             ]
 
+    async def _refresh_deployment_state(self) -> DeploymentState:
+        try:
+            state = await self._deployment_state_repository.get_state()
+        except Exception as exc:
+            msg = f'Deployment state sync error: {exc}'
+            logger.warning(msg)
+            self._metrics.record_error('deployment')
+            if self._on_error:
+                self._on_error(msg)
+            return self._deployment_state
+
+        previous_status = self._deployment_state.status
+        previous_target = self._deployment_state.target_sha
+        self._deployment_state = state
+        self._stats.deployment_status = state.status
+
+        if state.status != previous_status or state.target_sha != previous_target:
+            logger.info(
+                'deployment_state status=%s target_sha=%s requested_by=%s requested_at=%s',
+                state.status,
+                state.target_sha or '-',
+                state.requested_by or '-',
+                state.requested_at.isoformat() if state.requested_at else '-',
+            )
+        return state
+
+    async def _allows_new_trades(self) -> bool:
+        state = await self._refresh_deployment_state()
+        return not state.is_draining
+
     async def _run_cycle(self) -> None:
         try:
+            await self._refresh_deployment_state()
             result = await self._scanner.execute(self._scan_config)
             self._stats.scan_count += 1
             self._stats.last_scan_at = result.scanned_at
@@ -439,6 +477,13 @@ class ArbitrageBotService:
             for opp in result.opportunities:
                 if not opp.is_profitable(self._scan_config.min_profit_percent):
                     continue
+                if not await self._allows_new_trades():
+                    logger.info(
+                        'deployment drain active, skip new trades open_positions=%s pending_opportunities=%s',
+                        len(self._position_manager.open_positions),
+                        len(result.opportunities),
+                    )
+                    break
                 try:
                     if opp.strategy in {'futures_spot', 'futures_funding'}:
                         if self._position_manager.has_open_position(opp.symbol):

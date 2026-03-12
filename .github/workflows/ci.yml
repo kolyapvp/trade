@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify Python syntax
+        run: python -m compileall bot main.py
+
+      - name: Verify deploy script syntax
+        run: bash -n ops/deploy.sh
+
+      - name: Verify Docker Compose config
+        run: docker compose config >/dev/null
+
+      - name: Verify Docker build
+        run: docker build -t trade-bot:ci .
