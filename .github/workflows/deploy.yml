@@ -61,6 +61,9 @@ jobs:
       DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
       TARGET_SHA: ${{ github.sha }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
       - name: Validate deploy secrets
         run: |
           test -n "$DEPLOY_HOST"
