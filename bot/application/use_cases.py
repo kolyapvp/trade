@@ -512,14 +512,25 @@ class FuturesSpotPositionManager:
         if target_spot_amount <= 0:
             raise LiveExecutionError(f'Cannot normalize spot amount for {opp.symbol} on {d.spot_exchange}')
 
+        spot_balance_before = await self._fetch_spot_available_balance(spot_exchange, opp.symbol)
         spot_order = None
         futures_order = None
+        actual_spot_amount = 0.0
         try:
             spot_order = await spot_exchange.create_market_order(opp.symbol, 'buy', target_spot_amount)
             if spot_order.base_amount <= 0:
                 raise LiveExecutionError(f'Spot order filled zero quantity on {d.spot_exchange}')
 
-            futures_amount = await futures_exchange.normalize_order_amount(opp.symbol, spot_order.base_amount)
+            actual_spot_amount = await self._resolve_acquired_spot_amount(
+                spot_exchange,
+                opp.symbol,
+                spot_balance_before,
+                spot_order,
+            )
+            if actual_spot_amount <= 0:
+                actual_spot_amount = spot_order.base_amount
+
+            futures_amount = await futures_exchange.normalize_order_amount(opp.symbol, actual_spot_amount)
             if futures_amount <= 0:
                 raise LiveExecutionError(f'Cannot normalize futures amount for {opp.symbol} on {d.futures_exchange}')
 
@@ -553,9 +564,9 @@ class FuturesSpotPositionManager:
             position_usdt=spot_order.cost or opp.position_size_usdt,
             spot_taker_fee=d.spot_taker_fee,
             futures_taker_fee=d.futures_taker_fee,
-            spot_base_quantity=spot_order.base_amount,
+            spot_base_quantity=actual_spot_amount or spot_order.base_amount,
             futures_base_quantity=futures_order.base_amount,
-            spot_order_amount=spot_order.base_amount,
+            spot_order_amount=actual_spot_amount or spot_order.base_amount,
             futures_order_amount=futures_order.filled or futures_order.amount,
         )
         self._positions[opp.symbol] = pos
@@ -777,6 +788,16 @@ class FuturesSpotPositionManager:
                                 f'Live close unavailable for route {pos.spot_exchange}->{pos.futures_exchange}'
                             )
 
+                        spot_close_amount = await self._resolve_spot_sell_amount(
+                            spot_exchange,
+                            symbol,
+                            pos.spot_order_amount,
+                        )
+                        if spot_close_amount <= 0:
+                            raise SafetyViolationError(
+                                f'Critical close failure left no spot balance on {pos.spot_exchange} for {symbol}'
+                            )
+
                         futures_close = None
                         try:
                             futures_close = await futures_exchange.create_market_order(
@@ -789,7 +810,7 @@ class FuturesSpotPositionManager:
                             if not self._is_futures_leg_absent_error(exc):
                                 raise LiveExecutionError(str(exc)) from exc
                         try:
-                            spot_close = await spot_exchange.create_market_order(symbol, 'sell', pos.spot_order_amount)
+                            spot_close = await spot_exchange.create_market_order(symbol, 'sell', spot_close_amount)
                         except Exception as exc:
                             if futures_close is not None:
                                 rolled_back = await self._rollback_futures_close(
@@ -1052,6 +1073,34 @@ class FuturesSpotPositionManager:
                 f'Close failure limit reached for {symbol}: {count}/{self._max_close_failures}'
             ) from exc
 
+    async def _fetch_spot_available_balance(self, exchange: IExchange, symbol: str) -> float:
+        base_currency = symbol.split('/')[0]
+        balance = await exchange.fetch_free_balance(base_currency)
+        return max(balance, 0.0)
+
+    async def _resolve_spot_sell_amount(self, exchange: IExchange, symbol: str, target_amount: float) -> float:
+        available_balance = await self._fetch_spot_available_balance(exchange, symbol)
+        if available_balance <= 0:
+            return 0.0
+        sell_amount = min(max(target_amount, 0.0), available_balance)
+        if sell_amount <= 0:
+            return 0.0
+        normalized_amount = await exchange.normalize_order_amount(symbol, sell_amount)
+        return min(normalized_amount, sell_amount)
+
+    async def _resolve_acquired_spot_amount(self, exchange: IExchange, symbol: str, balance_before: float, order) -> float:
+        fallback_amount = order.base_amount or order.filled or order.amount
+        for attempt in range(3):
+            balance_after = await self._fetch_spot_available_balance(exchange, symbol)
+            acquired_amount = max(balance_after - balance_before, 0.0)
+            if acquired_amount > 0:
+                normalized_amount = await exchange.normalize_order_amount(symbol, acquired_amount)
+                if normalized_amount > 0:
+                    return min(normalized_amount, fallback_amount)
+            if attempt < 2:
+                await asyncio.sleep(0.5)
+        return fallback_amount
+
     def _funding_close_reason(self, position: FuturesFundingPosition) -> Optional[str]:
         if position.target_close_at and datetime.now() >= position.target_close_at:
             return 'Фандинг получен, цикл завершён'
@@ -1150,7 +1199,10 @@ class FuturesSpotPositionManager:
             return True
         for attempt in range(3):
             try:
-                await exchange.create_market_order(symbol, 'sell', rollback_amount)
+                sell_amount = await self._resolve_spot_sell_amount(exchange, symbol, rollback_amount)
+                if sell_amount <= 0:
+                    return False
+                await exchange.create_market_order(symbol, 'sell', sell_amount)
                 return True
             except Exception:
                 if attempt == 2:
