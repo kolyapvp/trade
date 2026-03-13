@@ -885,7 +885,7 @@ class FuturesSpotPositionManager:
             ) from exc
 
     async def _rollback_spot_open(self, exchange: IExchange, symbol: str, order) -> None:
-        rollback_amount = order.filled or order.amount
+        rollback_amount = order.base_amount or order.filled or order.amount
         if rollback_amount <= 0:
             return
         try:

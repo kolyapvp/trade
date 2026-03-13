@@ -146,7 +146,15 @@ class CcxtExchangeAdapter(IExchange):
         return float(value or 0.0)
 
     async def fetch_total_balance_usdt(self, quote_currency: str = 'USDT') -> float:
-        balance = await self._exchange.fetch_balance()
+        params = {'type': 'swap'} if self.info.supports_futures else {}
+        balance = await self._exchange.fetch_balance(params)
+        if self.info.supports_futures:
+            totals = balance.get('total') or {}
+            value = totals.get(quote_currency)
+            if value is None:
+                account = balance.get(quote_currency) or {}
+                value = account.get('total', 0.0)
+            return float(value or 0.0)
         totals = balance.get('total') or {}
         total_balance_usdt = 0.0
         for currency, raw_amount in totals.items():
