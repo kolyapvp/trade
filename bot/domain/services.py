@@ -78,11 +78,12 @@ class ProfitCalculator:
         self,
         spot_price: float,
         futures_price: float,
-        funding_rate: float,
         position_usdt: float,
         spot_fee: Fee,
         futures_fee: Fee,
     ) -> dict:
+        if spot_price <= 0 or futures_price <= 0:
+            return self._empty()
         basis = futures_price - spot_price
         basis_percent = (basis / spot_price * 100) if spot_price > 0 else 0.0
 
@@ -90,18 +91,20 @@ class ProfitCalculator:
         spot_fee_usdt = spot_fee.calculate(position_usdt)
         futures_fee_usdt = futures_fee.calculate(position_usdt)
 
-        funding_income = position_usdt * funding_rate
-        basis_profit = qty * abs(basis)
+        basis_profit = qty * basis
         total_fees = (spot_fee_usdt + futures_fee_usdt) * 2
 
-        profit_usdt = basis_profit + funding_income - total_fees
+        profit_usdt = basis_profit - total_fees
         profit_percent = (profit_usdt / position_usdt * 100) if position_usdt > 0 else 0.0
 
         return {
+            'is_profitable': profit_usdt > 0,
             'profit_usdt': profit_usdt,
             'profit_percent': profit_percent,
             'basis': basis,
             'basis_percent': basis_percent,
+            'basis_profit_usdt': basis_profit,
+            'total_fees_usdt': total_fees,
         }
 
     def calculate_futures_funding(
@@ -143,6 +146,10 @@ class ProfitCalculator:
             'is_profitable': False,
             'profit_usdt': 0.0,
             'profit_percent': 0.0,
+            'basis': 0.0,
+            'basis_percent': 0.0,
+            'basis_profit_usdt': 0.0,
+            'total_fees_usdt': 0.0,
             'buy_price': 0.0,
             'sell_price': 0.0,
             'effective_qty': 0.0,
@@ -268,10 +275,11 @@ class ArbitrageDetector:
         min_profit_percent: float,
         long_only: bool = True,
     ) -> ArbitrageOpportunity | None:
+        spot_entry = spot_ticker.ask or spot_ticker.last or spot_ticker.bid
+        futures_entry = futures_ticker.bid or futures_ticker.last or futures_ticker.ask
         result = self._calc.calculate_futures_spot(
-            spot_ticker.last,
-            futures_ticker.last,
-            futures_ticker.funding_rate,
+            spot_entry,
+            futures_entry,
             position_usdt,
             spot_fee,
             futures_fee,
@@ -279,6 +287,9 @@ class ArbitrageDetector:
 
         basis = result['basis']
         if long_only and basis < 0:
+            return None
+
+        if not result.get('is_profitable'):
             return None
 
         if result['profit_percent'] < min_profit_percent:
@@ -294,8 +305,8 @@ class ArbitrageDetector:
                 spot_exchange=spot_exchange_id,
                 futures_exchange=futures_exchange_id,
                 symbol=symbol,
-                spot_price=spot_ticker.last,
-                futures_price=futures_ticker.last,
+                spot_price=spot_entry,
+                futures_price=futures_entry,
                 funding_rate=futures_ticker.funding_rate,
                 basis=result['basis'],
                 basis_percent=result['basis_percent'],

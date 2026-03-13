@@ -49,6 +49,10 @@ class ExchangeOrder:
     average: float
     cost: float
     status: str
+    fee_currency: str = ''
+    fee_cost: float = 0.0
+    fee_cost_quote: float = 0.0
+    timestamp: int = 0
     reduce_only: bool = False
 
 
@@ -59,6 +63,15 @@ class ExchangePosition:
     contracts: float
     base_amount: float
     entry_price: float = 0.0
+
+
+@dataclass(frozen=True)
+class FundingPayment:
+    symbol: str
+    code: str
+    amount: float
+    timestamp: int
+    id: str = ''
 
 
 class IExchange(abc.ABC):
@@ -130,6 +143,16 @@ class IExchange(abc.ABC):
 
     @abc.abstractmethod
     async def fetch_futures_positions(self, symbols: list[str]) -> dict[str, ExchangePosition]:
+        ...
+
+    @abc.abstractmethod
+    async def fetch_funding_payments(
+        self,
+        symbol: str,
+        since: int | None = None,
+        until: int | None = None,
+        limit: int = 100,
+    ) -> list[FundingPayment]:
         ...
 
     @abc.abstractmethod

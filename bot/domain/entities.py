@@ -82,6 +82,10 @@ class OpenPositionSnapshot:
     futures_base_quantity: float = 0.0
     spot_order_amount: float = 0.0
     futures_order_amount: float = 0.0
+    entry_spot_cost_usdt: float = 0.0
+    entry_spot_fee_usdt: float = 0.0
+    entry_futures_cost_usdt: float = 0.0
+    entry_futures_fee_usdt: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -125,6 +129,10 @@ class FuturesSpotPosition:
         futures_base_quantity: float = 0.0,
         spot_order_amount: float = 0.0,
         futures_order_amount: float = 0.0,
+        entry_spot_cost_usdt: float = 0.0,
+        entry_spot_fee_usdt: float = 0.0,
+        entry_futures_cost_usdt: float = 0.0,
+        entry_futures_fee_usdt: float = 0.0,
         position_id: Optional[str] = None,
         opened_at: Optional[datetime] = None,
     ):
@@ -145,6 +153,10 @@ class FuturesSpotPosition:
         self.futures_base_quantity = futures_base_quantity or implied_qty
         self.spot_order_amount = spot_order_amount or self.spot_base_quantity
         self.futures_order_amount = futures_order_amount or self.futures_base_quantity
+        self.entry_spot_cost_usdt = entry_spot_cost_usdt or position_usdt
+        self.entry_spot_fee_usdt = entry_spot_fee_usdt
+        self.entry_futures_cost_usdt = entry_futures_cost_usdt or position_usdt
+        self.entry_futures_fee_usdt = entry_futures_fee_usdt
         self.opened_at = opened_at or now
         self.status = 'open'
         self.exit_spot_price: float = 0.0
@@ -162,6 +174,31 @@ class FuturesSpotPosition:
         funding_income = self.position_usdt * self.funding_rate * funding_periods
         total_fees = (self.spot_taker_fee + self.futures_taker_fee) * self.position_usdt * 2
         profit = spot_pnl + futures_pnl + funding_income - total_fees
+        self.exit_spot_price = exit_spot
+        self.exit_futures_price = exit_futures
+        self.exit_basis_percent = ((exit_futures - exit_spot) / exit_spot * 100) if exit_spot > 0 else 0.0
+        self.actual_profit_usdt = profit
+        self.status = 'closed'
+        self.closed_at = datetime.now()
+        self.close_reason = reason
+        return profit
+
+    def close_live(
+        self,
+        exit_spot: float,
+        exit_futures: float,
+        spot_close_cost_usdt: float,
+        spot_close_fee_usdt: float,
+        futures_close_cost_usdt: float,
+        futures_close_fee_usdt: float,
+        funding_income_usdt: float,
+        reason: str,
+    ) -> float:
+        spot_net = spot_close_cost_usdt - spot_close_fee_usdt
+        spot_entry_total = self.entry_spot_cost_usdt + self.entry_spot_fee_usdt
+        futures_entry_net = self.entry_futures_cost_usdt - self.entry_futures_fee_usdt
+        futures_close_total = futures_close_cost_usdt + futures_close_fee_usdt
+        profit = spot_net - spot_entry_total + futures_entry_net - futures_close_total + funding_income_usdt
         self.exit_spot_price = exit_spot
         self.exit_futures_price = exit_futures
         self.exit_basis_percent = ((exit_futures - exit_spot) / exit_spot * 100) if exit_spot > 0 else 0.0
@@ -193,6 +230,10 @@ class FuturesSpotPosition:
             futures_base_quantity=self.futures_base_quantity,
             spot_order_amount=self.spot_order_amount,
             futures_order_amount=self.futures_order_amount,
+            entry_spot_cost_usdt=self.entry_spot_cost_usdt,
+            entry_spot_fee_usdt=self.entry_spot_fee_usdt,
+            entry_futures_cost_usdt=self.entry_futures_cost_usdt,
+            entry_futures_fee_usdt=self.entry_futures_fee_usdt,
             opened_at=self.opened_at,
         )
 
@@ -213,6 +254,10 @@ class FuturesSpotPosition:
             futures_base_quantity=snapshot.futures_base_quantity,
             spot_order_amount=snapshot.spot_order_amount,
             futures_order_amount=snapshot.futures_order_amount,
+            entry_spot_cost_usdt=snapshot.entry_spot_cost_usdt,
+            entry_spot_fee_usdt=snapshot.entry_spot_fee_usdt,
+            entry_futures_cost_usdt=snapshot.entry_futures_cost_usdt,
+            entry_futures_fee_usdt=snapshot.entry_futures_fee_usdt,
             position_id=snapshot.position_id,
             opened_at=snapshot.opened_at,
         )
@@ -238,6 +283,10 @@ class FuturesFundingPosition:
         short_base_quantity: float = 0.0,
         long_order_amount: float = 0.0,
         short_order_amount: float = 0.0,
+        entry_long_cost_usdt: float = 0.0,
+        entry_long_fee_usdt: float = 0.0,
+        entry_short_cost_usdt: float = 0.0,
+        entry_short_fee_usdt: float = 0.0,
         position_id: Optional[str] = None,
         opened_at: Optional[datetime] = None,
     ):
@@ -259,6 +308,10 @@ class FuturesFundingPosition:
         self.short_base_quantity = short_base_quantity or implied_qty
         self.long_order_amount = long_order_amount or self.long_base_quantity
         self.short_order_amount = short_order_amount or self.short_base_quantity
+        self.entry_long_cost_usdt = entry_long_cost_usdt or position_usdt
+        self.entry_long_fee_usdt = entry_long_fee_usdt
+        self.entry_short_cost_usdt = entry_short_cost_usdt or position_usdt
+        self.entry_short_fee_usdt = entry_short_fee_usdt
         self.opened_at = opened_at or now
         self.status = 'open'
         self.exit_long_price: float = 0.0
@@ -293,6 +346,31 @@ class FuturesFundingPosition:
         self.close_reason = reason
         return profit
 
+    def close_live(
+        self,
+        exit_long: float,
+        exit_short: float,
+        long_close_cost_usdt: float,
+        long_close_fee_usdt: float,
+        short_close_cost_usdt: float,
+        short_close_fee_usdt: float,
+        funding_income_usdt: float,
+        reason: str,
+    ) -> float:
+        long_net = long_close_cost_usdt - long_close_fee_usdt
+        long_entry_total = self.entry_long_cost_usdt + self.entry_long_fee_usdt
+        short_entry_net = self.entry_short_cost_usdt - self.entry_short_fee_usdt
+        short_close_total = short_close_cost_usdt + short_close_fee_usdt
+        profit = long_net - long_entry_total + short_entry_net - short_close_total + funding_income_usdt
+        self.exit_long_price = exit_long
+        self.exit_short_price = exit_short
+        self.exit_spread_percent = ((exit_short - exit_long) / exit_long * 100) if exit_long > 0 else 0.0
+        self.actual_profit_usdt = profit
+        self.status = 'closed'
+        self.closed_at = datetime.now()
+        self.close_reason = reason
+        return profit
+
     def hours_open(self) -> float:
         return (datetime.now() - self.opened_at).total_seconds() / 3600
 
@@ -316,6 +394,10 @@ class FuturesFundingPosition:
             futures_base_quantity=self.short_base_quantity,
             spot_order_amount=self.long_order_amount,
             futures_order_amount=self.short_order_amount,
+            entry_spot_cost_usdt=self.entry_long_cost_usdt,
+            entry_spot_fee_usdt=self.entry_long_fee_usdt,
+            entry_futures_cost_usdt=self.entry_short_cost_usdt,
+            entry_futures_fee_usdt=self.entry_short_fee_usdt,
             opened_at=self.opened_at,
         )
 
@@ -337,6 +419,10 @@ class FuturesFundingPosition:
             short_base_quantity=snapshot.futures_base_quantity,
             long_order_amount=snapshot.spot_order_amount,
             short_order_amount=snapshot.futures_order_amount,
+            entry_long_cost_usdt=snapshot.entry_spot_cost_usdt,
+            entry_long_fee_usdt=snapshot.entry_spot_fee_usdt,
+            entry_short_cost_usdt=snapshot.entry_futures_cost_usdt,
+            entry_short_fee_usdt=snapshot.entry_futures_fee_usdt,
             position_id=snapshot.position_id,
             opened_at=snapshot.opened_at,
         )

@@ -6,7 +6,15 @@ from typing import Optional
 
 import ccxt.async_support as ccxt
 
-from ..domain.ports import IExchange, ExchangeInfo, ExchangeOrder, ExchangePosition, Ticker, FuturesTicker
+from ..domain.ports import (
+    IExchange,
+    ExchangeInfo,
+    ExchangeOrder,
+    ExchangePosition,
+    FundingPayment,
+    Ticker,
+    FuturesTicker,
+)
 from ..domain.value_objects import Fee, OrderBook, OrderBookLevel
 
 
@@ -239,9 +247,11 @@ class CcxtExchangeAdapter(IExchange):
                 raise RuntimeError(f'Cannot determine price for market buy on {self.info.id} {market_symbol}')
             price = float(self._exchange.price_to_precision(market_symbol, raw_price))
         raw = await self._exchange.create_order(market_symbol, 'market', side, precise_amount, price, params)
-        filled = float(raw.get('filled') or raw.get('amount') or precise_amount or 0.0)
+        execution = await self._resolve_order_execution(market_symbol, market, raw)
+        filled = execution['filled'] or float(raw.get('filled') or raw.get('amount') or precise_amount or 0.0)
         base_amount = await self.convert_order_amount_to_base(symbol, filled)
-        fee_currency, fee_cost = self._extract_order_fee(raw)
+        fee_currency = execution['fee_currency']
+        fee_cost = execution['fee_cost']
         if side == 'buy' and not bool(market.get('contract')) and fee_currency == market.get('base'):
             base_amount = max(base_amount - fee_cost, 0.0)
         return ExchangeOrder(
@@ -252,11 +262,53 @@ class CcxtExchangeAdapter(IExchange):
             amount=float(raw.get('amount') or precise_amount or 0.0),
             filled=filled,
             base_amount=base_amount,
-            average=float(raw.get('average') or raw.get('price') or 0.0),
-            cost=float(raw.get('cost') or 0.0),
+            average=execution['average'],
+            cost=execution['cost'],
             status=str(raw.get('status') or 'open'),
+            fee_currency=fee_currency or '',
+            fee_cost=fee_cost,
+            fee_cost_quote=execution['fee_cost_quote'],
+            timestamp=execution['timestamp'],
             reduce_only=reduce_only and bool(market.get('contract')),
         )
+
+    async def fetch_funding_payments(
+        self,
+        symbol: str,
+        since: int | None = None,
+        until: int | None = None,
+        limit: int = 100,
+    ) -> list[FundingPayment]:
+        if not self.info.supports_futures or not self._supports('fetchFundingHistory'):
+            return []
+        market_symbol, _ = await self._get_market(symbol)
+        params = {}
+        if until is not None:
+            params['until'] = until
+        try:
+            raw_items = await self._exchange.fetch_funding_history(
+                market_symbol,
+                since,
+                limit,
+                params,
+            )
+        except Exception:
+            return []
+        payments: list[FundingPayment] = []
+        for item in raw_items or []:
+            timestamp = int(item.get('timestamp') or 0)
+            if since is not None and timestamp and timestamp < since:
+                continue
+            if until is not None and timestamp and timestamp > until:
+                continue
+            payments.append(FundingPayment(
+                symbol=str(item.get('symbol') or market_symbol),
+                code=str(item.get('code') or ''),
+                amount=float(item.get('amount') or 0.0),
+                timestamp=timestamp,
+                id=str(item.get('id') or ''),
+            ))
+        return payments
 
     def _extract_order_fee(self, raw: dict) -> tuple[str | None, float]:
         fee = raw.get('fee')
@@ -300,6 +352,134 @@ class CcxtExchangeAdapter(IExchange):
                     return str(currency), abs(float(total_fee))
 
         return None, 0.0
+
+    async def _resolve_order_execution(self, market_symbol: str, market: dict, raw: dict) -> dict[str, float | str]:
+        order_id = str(raw.get('id') or '')
+        order_timestamp = int(raw.get('timestamp') or self._exchange.milliseconds() or 0)
+        trades = await self._resolve_order_trades(market_symbol, order_id, order_timestamp, raw)
+
+        average = float(raw.get('average') or raw.get('price') or 0.0)
+        cost = float(raw.get('cost') or 0.0)
+        filled = float(raw.get('filled') or raw.get('amount') or 0.0)
+        fee_currency, fee_cost = self._extract_order_fee(raw)
+        fee_cost_quote = await self._convert_fee_to_quote(
+            market,
+            fee_currency,
+            fee_cost,
+            average,
+        )
+
+        if trades:
+            aggregated_cost = 0.0
+            aggregated_amount = 0.0
+            fee_totals: dict[str, float] = {}
+            for trade in trades:
+                trade_amount = abs(float(trade.get('amount') or 0.0))
+                trade_cost = abs(float(trade.get('cost') or 0.0))
+                trade_price = float(trade.get('price') or 0.0)
+                if trade_cost <= 0 and trade_amount > 0 and trade_price > 0:
+                    trade_cost = trade_amount * trade_price
+                aggregated_amount += trade_amount
+                aggregated_cost += trade_cost
+                self._accumulate_fees(fee_totals, trade.get('fee'))
+                self._accumulate_fee_list(fee_totals, trade.get('fees'))
+
+            if aggregated_cost > 0:
+                cost = aggregated_cost
+            if aggregated_amount > 0:
+                average = cost / aggregated_amount if cost > 0 else average
+
+            if fee_totals:
+                fee_cost_quote = 0.0
+                for currency, total_cost in fee_totals.items():
+                    fee_cost_quote += await self._convert_fee_to_quote(
+                        market,
+                        currency,
+                        total_cost,
+                        average,
+                    )
+                if len(fee_totals) == 1:
+                    fee_currency, fee_cost = next(iter(fee_totals.items()))
+                else:
+                    fee_currency = ''
+                    fee_cost = 0.0
+
+        return {
+            'average': average,
+            'cost': cost,
+            'filled': filled,
+            'fee_currency': fee_currency or '',
+            'fee_cost': fee_cost,
+            'fee_cost_quote': fee_cost_quote,
+            'timestamp': order_timestamp,
+        }
+
+    async def _resolve_order_trades(
+        self,
+        market_symbol: str,
+        order_id: str,
+        order_timestamp: int,
+        raw: dict,
+    ) -> list[dict]:
+        raw_trades = raw.get('trades')
+        if isinstance(raw_trades, list) and raw_trades:
+            return [trade for trade in raw_trades if isinstance(trade, dict)]
+        if not order_id or not self._supports('fetchMyTrades'):
+            return []
+        since = max(order_timestamp - 5 * 60 * 1000, 0)
+        for attempt in range(3):
+            try:
+                trades = await self._exchange.fetch_my_trades(market_symbol, since, 100)
+            except Exception:
+                return []
+            matched = [
+                trade for trade in trades
+                if isinstance(trade, dict) and str(trade.get('order') or '') == order_id
+            ]
+            if matched:
+                return matched
+            if attempt < 2:
+                await asyncio.sleep(0.5 * (attempt + 1))
+        return []
+
+    def _accumulate_fees(self, fee_totals: dict[str, float], fee: dict | None) -> None:
+        if not isinstance(fee, dict):
+            return
+        currency = fee.get('currency')
+        cost = fee.get('cost')
+        if currency is None or cost is None:
+            return
+        fee_totals[str(currency)] = fee_totals.get(str(currency), 0.0) + abs(float(cost))
+
+    def _accumulate_fee_list(self, fee_totals: dict[str, float], fees: list | None) -> None:
+        if not isinstance(fees, list):
+            return
+        for item in fees:
+            self._accumulate_fees(fee_totals, item if isinstance(item, dict) else None)
+
+    async def _convert_fee_to_quote(
+        self,
+        market: dict,
+        fee_currency: str | None,
+        fee_cost: float,
+        average_price: float,
+    ) -> float:
+        if not fee_currency or fee_cost <= 0:
+            return 0.0
+        quote_currency = str(market.get('quote') or market.get('settle') or '')
+        base_currency = str(market.get('base') or '')
+        if fee_currency == quote_currency:
+            return fee_cost
+        if fee_currency == base_currency and average_price > 0:
+            return fee_cost * average_price
+        conversion_symbol = await self._find_conversion_symbol(fee_currency, quote_currency)
+        if conversion_symbol is None:
+            return 0.0
+        ticker = await self._exchange.fetch_ticker(conversion_symbol)
+        price = ticker.get('last') or ticker.get('bid') or ticker.get('ask')
+        if price is None:
+            return 0.0
+        return fee_cost * float(price)
 
     async def prepare_futures_execution(
         self,

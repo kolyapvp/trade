@@ -568,6 +568,10 @@ class FuturesSpotPositionManager:
             futures_base_quantity=futures_order.base_amount,
             spot_order_amount=actual_spot_amount or spot_order.base_amount,
             futures_order_amount=futures_order.filled or futures_order.amount,
+            entry_spot_cost_usdt=spot_order.cost or opp.position_size_usdt,
+            entry_spot_fee_usdt=spot_order.fee_cost_quote,
+            entry_futures_cost_usdt=futures_order.cost or opp.position_size_usdt,
+            entry_futures_fee_usdt=futures_order.fee_cost_quote,
         )
         self._positions[opp.symbol] = pos
         self._reset_close_failures(opp.symbol)
@@ -653,6 +657,10 @@ class FuturesSpotPositionManager:
             short_base_quantity=short_order.base_amount,
             long_order_amount=long_order.filled or long_order.amount,
             short_order_amount=short_order.filled or short_order.amount,
+            entry_long_cost_usdt=long_order.cost or opp.position_size_usdt,
+            entry_long_fee_usdt=long_order.fee_cost_quote,
+            entry_short_cost_usdt=short_order.cost or opp.position_size_usdt,
+            entry_short_fee_usdt=short_order.fee_cost_quote,
         )
         self._positions[opp.symbol] = pos
         self._reset_close_failures(opp.symbol)
@@ -759,9 +767,26 @@ class FuturesSpotPositionManager:
                                         f'Critical rollback failure after partial futures-funding close for {symbol}'
                                     ) from exc
                             raise LiveExecutionError(str(exc)) from exc
-                        pos.close(
+                        funding_income = await self._resolve_funding_payments_total(
+                            long_exchange,
+                            symbol,
+                            pos.opened_at,
+                        )
+                        funding_income += await self._resolve_funding_payments_total(
+                            short_exchange,
+                            symbol,
+                            pos.opened_at,
+                        )
+                        short_close_cost = short_close.cost if short_close is not None else pos.short_base_quantity * current_short
+                        short_close_fee = short_close.fee_cost_quote if short_close is not None else 0.0
+                        pos.close_live(
                             long_close.average or current_long,
                             short_close.average if short_close and short_close.average else current_short,
+                            long_close.cost,
+                            long_close.fee_cost_quote,
+                            short_close_cost,
+                            short_close_fee,
+                            funding_income,
                             reason,
                         )
                         trade = self._build_futures_funding_trade(pos, reason)
@@ -828,9 +853,24 @@ class FuturesSpotPositionManager:
                                 ) from exc
                             raise LiveExecutionError(str(exc)) from exc
 
-                        pos.close(
+                        funding_income = await self._resolve_funding_payments_total(
+                            futures_exchange,
+                            symbol,
+                            pos.opened_at,
+                        )
+                        futures_close_cost = (
+                            futures_close.cost
+                            if futures_close is not None else pos.futures_base_quantity * current_futures
+                        )
+                        futures_close_fee = futures_close.fee_cost_quote if futures_close is not None else 0.0
+                        pos.close_live(
                             spot_close.average or current_spot,
-                            futures_close.average or current_futures,
+                            futures_close.average if futures_close and futures_close.average else current_futures,
+                            spot_close.cost,
+                            spot_close.fee_cost_quote,
+                            futures_close_cost,
+                            futures_close_fee,
+                            funding_income,
                             reason,
                         )
                         trade = self._build_futures_spot_trade(pos, reason)
@@ -1101,6 +1141,22 @@ class FuturesSpotPositionManager:
                 await asyncio.sleep(0.5)
         return fallback_amount
 
+    async def _resolve_funding_payments_total(
+        self,
+        exchange: IExchange,
+        symbol: str,
+        opened_at: datetime,
+    ) -> float:
+        since = max(int(opened_at.timestamp() * 1000) - 60_000, 0)
+        until = int(datetime.now().timestamp() * 1000) + 60_000
+        payments = await exchange.fetch_funding_payments(symbol, since=since, until=until, limit=100)
+        total = 0.0
+        for payment in payments:
+            if payment.code and payment.code != 'USDT':
+                continue
+            total += payment.amount
+        return total
+
     def _funding_close_reason(self, position: FuturesFundingPosition) -> Optional[str]:
         if position.target_close_at and datetime.now() >= position.target_close_at:
             return 'Фандинг получен, цикл завершён'
@@ -1109,13 +1165,15 @@ class FuturesSpotPositionManager:
         return None
 
     def _build_futures_spot_trade(self, pos: FuturesSpotPosition, reason: str) -> VirtualTrade:
-        entry_basis_profit = (
-            pos.spot_base_quantity * max(pos.entry_futures_price - pos.entry_spot_price, 0.0)
-        ) + (
-            pos.futures_base_quantity * max(pos.entry_spot_price - pos.entry_futures_price, 0.0)
+        qty = min(pos.spot_base_quantity, pos.futures_base_quantity)
+        entry_basis_profit = qty * (pos.entry_futures_price - pos.entry_spot_price)
+        entry_fees = (
+            pos.entry_spot_fee_usdt
+            + pos.entry_futures_fee_usdt
+            + pos.spot_taker_fee * pos.position_usdt
+            + pos.futures_taker_fee * pos.position_usdt
         )
-        entry_fees = (pos.spot_taker_fee + pos.futures_taker_fee) * pos.position_usdt * 2
-        expected_profit = entry_basis_profit + pos.position_usdt * pos.funding_rate - entry_fees
+        expected_profit = entry_basis_profit - entry_fees
         expected_pct = (expected_profit / pos.position_usdt * 100) if pos.position_usdt > 0 else 0.0
         trade = VirtualTrade(
             strategy='futures_spot',
@@ -1142,7 +1200,10 @@ class FuturesSpotPositionManager:
 
     def _build_futures_funding_trade(self, pos: FuturesFundingPosition, reason: str) -> VirtualTrade:
         expected_profit = pos.position_usdt * pos.funding_rate_delta - (
-            (pos.long_taker_fee + pos.short_taker_fee) * pos.position_usdt * 2
+            pos.entry_long_fee_usdt
+            + pos.entry_short_fee_usdt
+            + pos.long_taker_fee * pos.position_usdt
+            + pos.short_taker_fee * pos.position_usdt
         )
         expected_pct = (expected_profit / pos.position_usdt * 100) if pos.position_usdt > 0 else 0.0
         target_funding_time = int(pos.target_close_at.timestamp() * 1000) if pos.target_close_at else 0

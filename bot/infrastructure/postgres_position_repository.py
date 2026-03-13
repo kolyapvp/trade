@@ -32,6 +32,10 @@ class PostgresOpenPositionSnapshotRepository(IOpenPositionSnapshotRepository):
                 futures_base_quantity DOUBLE PRECISION NOT NULL DEFAULT 0,
                 spot_order_amount DOUBLE PRECISION NOT NULL DEFAULT 0,
                 futures_order_amount DOUBLE PRECISION NOT NULL DEFAULT 0,
+                entry_spot_cost_usdt DOUBLE PRECISION NOT NULL DEFAULT 0,
+                entry_spot_fee_usdt DOUBLE PRECISION NOT NULL DEFAULT 0,
+                entry_futures_cost_usdt DOUBLE PRECISION NOT NULL DEFAULT 0,
+                entry_futures_fee_usdt DOUBLE PRECISION NOT NULL DEFAULT 0,
                 opened_at TIMESTAMP NOT NULL,
                 target_close_at TIMESTAMP,
                 updated_at TIMESTAMP NOT NULL DEFAULT NOW()
@@ -55,6 +59,18 @@ class PostgresOpenPositionSnapshotRepository(IOpenPositionSnapshotRepository):
         )
         await self._pool.execute(
             f'ALTER TABLE {self._table_name} ADD COLUMN IF NOT EXISTS futures_order_amount DOUBLE PRECISION NOT NULL DEFAULT 0'
+        )
+        await self._pool.execute(
+            f'ALTER TABLE {self._table_name} ADD COLUMN IF NOT EXISTS entry_spot_cost_usdt DOUBLE PRECISION NOT NULL DEFAULT 0'
+        )
+        await self._pool.execute(
+            f'ALTER TABLE {self._table_name} ADD COLUMN IF NOT EXISTS entry_spot_fee_usdt DOUBLE PRECISION NOT NULL DEFAULT 0'
+        )
+        await self._pool.execute(
+            f'ALTER TABLE {self._table_name} ADD COLUMN IF NOT EXISTS entry_futures_cost_usdt DOUBLE PRECISION NOT NULL DEFAULT 0'
+        )
+        await self._pool.execute(
+            f'ALTER TABLE {self._table_name} ADD COLUMN IF NOT EXISTS entry_futures_fee_usdt DOUBLE PRECISION NOT NULL DEFAULT 0'
         )
         await self._pool.execute(
             f'ALTER TABLE {self._table_name} ADD COLUMN IF NOT EXISTS target_close_at TIMESTAMP'
@@ -81,11 +97,15 @@ class PostgresOpenPositionSnapshotRepository(IOpenPositionSnapshotRepository):
                 futures_base_quantity,
                 spot_order_amount,
                 futures_order_amount,
+                entry_spot_cost_usdt,
+                entry_spot_fee_usdt,
+                entry_futures_cost_usdt,
+                entry_futures_fee_usdt,
                 opened_at,
                 target_close_at,
                 updated_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, NOW())
             ON CONFLICT (symbol) DO UPDATE SET
                 position_id = EXCLUDED.position_id,
                 strategy = EXCLUDED.strategy,
@@ -103,6 +123,10 @@ class PostgresOpenPositionSnapshotRepository(IOpenPositionSnapshotRepository):
                 futures_base_quantity = EXCLUDED.futures_base_quantity,
                 spot_order_amount = EXCLUDED.spot_order_amount,
                 futures_order_amount = EXCLUDED.futures_order_amount,
+                entry_spot_cost_usdt = EXCLUDED.entry_spot_cost_usdt,
+                entry_spot_fee_usdt = EXCLUDED.entry_spot_fee_usdt,
+                entry_futures_cost_usdt = EXCLUDED.entry_futures_cost_usdt,
+                entry_futures_fee_usdt = EXCLUDED.entry_futures_fee_usdt,
                 opened_at = EXCLUDED.opened_at,
                 target_close_at = EXCLUDED.target_close_at,
                 updated_at = NOW()
@@ -124,6 +148,10 @@ class PostgresOpenPositionSnapshotRepository(IOpenPositionSnapshotRepository):
             snapshot.futures_base_quantity,
             snapshot.spot_order_amount,
             snapshot.futures_order_amount,
+            snapshot.entry_spot_cost_usdt,
+            snapshot.entry_spot_fee_usdt,
+            snapshot.entry_futures_cost_usdt,
+            snapshot.entry_futures_fee_usdt,
             snapshot.opened_at,
             snapshot.target_close_at,
         )
@@ -154,11 +182,15 @@ class PostgresOpenPositionSnapshotRepository(IOpenPositionSnapshotRepository):
                         futures_base_quantity,
                         spot_order_amount,
                         futures_order_amount,
+                        entry_spot_cost_usdt,
+                        entry_spot_fee_usdt,
+                        entry_futures_cost_usdt,
+                        entry_futures_fee_usdt,
                         opened_at,
                         target_close_at,
                         updated_at
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW())
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, NOW())
                     ''',
                     [
                         (
@@ -179,6 +211,10 @@ class PostgresOpenPositionSnapshotRepository(IOpenPositionSnapshotRepository):
                             snapshot.futures_base_quantity,
                             snapshot.spot_order_amount,
                             snapshot.futures_order_amount,
+                            snapshot.entry_spot_cost_usdt,
+                            snapshot.entry_spot_fee_usdt,
+                            snapshot.entry_futures_cost_usdt,
+                            snapshot.entry_futures_fee_usdt,
                             snapshot.opened_at,
                             snapshot.target_close_at,
                         )
@@ -213,6 +249,10 @@ class PostgresOpenPositionSnapshotRepository(IOpenPositionSnapshotRepository):
                 futures_base_quantity,
                 spot_order_amount,
                 futures_order_amount,
+                entry_spot_cost_usdt,
+                entry_spot_fee_usdt,
+                entry_futures_cost_usdt,
+                entry_futures_fee_usdt,
                 opened_at,
                 target_close_at
             FROM {self._table_name}
@@ -239,8 +279,12 @@ class PostgresOpenPositionSnapshotRepository(IOpenPositionSnapshotRepository):
                     futures_base_quantity=float(row['futures_base_quantity']),
                     spot_order_amount=float(row['spot_order_amount']),
                     futures_order_amount=float(row['futures_order_amount']),
-                opened_at=row['opened_at'],
-            )
+                    entry_spot_cost_usdt=float(row['entry_spot_cost_usdt']),
+                    entry_spot_fee_usdt=float(row['entry_spot_fee_usdt']),
+                    entry_futures_cost_usdt=float(row['entry_futures_cost_usdt']),
+                    entry_futures_fee_usdt=float(row['entry_futures_fee_usdt']),
+                    opened_at=row['opened_at'],
+                )
             for row in rows
         ]
 
