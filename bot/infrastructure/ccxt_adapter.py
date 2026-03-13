@@ -372,17 +372,34 @@ class CcxtExchangeAdapter(IExchange):
         if not symbols:
             return result
         await self._ensure_markets_loaded()
-        prepared_symbols: list[str] = []
-        requested_by_prepared: dict[str, str] = {}
-        subtype = None
+        requests: list[tuple[str, str, dict]] = []
         for symbol in symbols:
             market_symbol, market = await self._get_market(symbol)
-            prepared_symbols.append(market_symbol)
-            requested_by_prepared[market_symbol] = symbol
-            if subtype is None:
-                subtype = 'linear' if market.get('linear') else 'inverse'
-        params = {'subType': subtype} if subtype else {}
-        positions = await self._exchange.fetch_positions(prepared_symbols, params)
+            subtype = 'linear' if market.get('linear') else 'inverse'
+            requests.append((symbol, market_symbol, {'subType': subtype}))
+        try:
+            positions = await self._exchange.fetch_positions(
+                [market_symbol for _, market_symbol, _ in requests],
+                requests[0][2],
+            )
+            await self._collect_positions(result, positions, {market_symbol: symbol for symbol, market_symbol, _ in requests})
+            return result
+        except Exception:
+            pass
+        for symbol, market_symbol, params in requests:
+            try:
+                positions = await self._exchange.fetch_positions([market_symbol], params)
+            except Exception:
+                continue
+            await self._collect_positions(result, positions, {market_symbol: symbol})
+        return result
+
+    async def _collect_positions(
+        self,
+        target: dict[str, ExchangePosition],
+        positions: list[dict],
+        requested_by_prepared: dict[str, str],
+    ) -> None:
         for position in positions:
             contracts = float(position.get('contracts') or 0.0)
             if abs(contracts) <= 0:
@@ -391,14 +408,13 @@ class CcxtExchangeAdapter(IExchange):
             requested_symbol = requested_by_prepared.get(market_symbol, market_symbol)
             base_amount = await self.convert_order_amount_to_base(requested_symbol, abs(contracts))
             side = str(position.get('side') or '').lower()
-            result[requested_symbol] = ExchangePosition(
+            target[requested_symbol] = ExchangePosition(
                 symbol=requested_symbol,
                 side=side,
                 contracts=abs(contracts),
                 base_amount=base_amount,
                 entry_price=float(position.get('entryPrice') or 0.0),
             )
-        return result
 
     async def is_available(self) -> bool:
         try:
