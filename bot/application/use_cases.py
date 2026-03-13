@@ -15,6 +15,7 @@ from ..domain.entities import (
 )
 from ..domain.ports import (
     IExchange,
+    ExchangePosition,
     IOpenPositionSnapshotRepository,
     IOpenPositionStore,
     ITradeAnalyticsRepository,
@@ -397,6 +398,10 @@ class LiveExecutionError(RuntimeError):
     pass
 
 
+class SafetyViolationError(LiveExecutionError):
+    pass
+
+
 class FuturesSpotPositionManager:
     def __init__(
         self,
@@ -424,6 +429,7 @@ class FuturesSpotPositionManager:
         self._positions: dict[str, FuturesSpotPosition | FuturesFundingPosition] = {}
         self._spot_execution_exchanges = spot_execution_exchanges or {}
         self._futures_execution_exchanges = futures_execution_exchanges or {}
+        self._execution_lock = asyncio.Lock()
 
     def has_open_position(self, symbol: str) -> bool:
         return symbol in self._positions
@@ -466,9 +472,10 @@ class FuturesSpotPositionManager:
         return pos
 
     async def open_live_position(self, opp: ArbitrageOpportunity) -> FuturesSpotPosition | FuturesFundingPosition:
-        if opp.strategy == 'futures_funding':
-            return await self._open_live_futures_funding_position(opp)
-        return await self._open_live_futures_spot_position(opp)
+        async with self._execution_lock:
+            if opp.strategy == 'futures_funding':
+                return await self._open_live_futures_funding_position(opp)
+            return await self._open_live_futures_spot_position(opp)
 
     async def _open_live_futures_spot_position(self, opp: ArbitrageOpportunity) -> FuturesSpotPosition:
         d = opp.details
@@ -486,6 +493,12 @@ class FuturesSpotPositionManager:
         if free_spot_usdt < opp.position_size_usdt:
             raise LiveExecutionError(
                 f'Insufficient USDT on {d.spot_exchange}: free={free_spot_usdt:.4f}, required={opp.position_size_usdt:.4f}'
+            )
+        required_margin = opp.position_size_usdt / max(self._futures_leverage, 1)
+        free_futures_usdt = await futures_exchange.fetch_free_balance('USDT')
+        if free_futures_usdt < required_margin:
+            raise LiveExecutionError(
+                f'Insufficient futures margin on {d.futures_exchange}: free={free_futures_usdt:.4f}, required={required_margin:.4f}'
             )
 
         target_spot_amount = await spot_exchange.normalize_order_amount(
@@ -510,8 +523,19 @@ class FuturesSpotPositionManager:
             if futures_order.base_amount <= 0:
                 raise LiveExecutionError(f'Futures order filled zero quantity on {d.futures_exchange}')
         except Exception as exc:
-            if futures_order is None and spot_order is not None:
-                await self._rollback_spot_open(spot_exchange, opp.symbol, spot_order)
+            if spot_order is not None and futures_order is None:
+                rolled_back = await self._rollback_spot_open(spot_exchange, opp.symbol, spot_order)
+                if not rolled_back:
+                    raise SafetyViolationError(
+                        f'Critical rollback failure after spot open on {d.spot_exchange} for {opp.symbol}'
+                    ) from exc
+            elif spot_order is not None and futures_order is not None:
+                futures_rolled_back = await self._rollback_futures_open(futures_exchange, opp.symbol, futures_order, 'buy')
+                spot_rolled_back = await self._rollback_spot_open(spot_exchange, opp.symbol, spot_order)
+                if not futures_rolled_back or not spot_rolled_back:
+                    raise SafetyViolationError(
+                        f'Critical rollback failure after partial futures-spot open for {opp.symbol}'
+                    ) from exc
             raise LiveExecutionError(str(exc)) from exc
 
         pos = FuturesSpotPosition(
@@ -582,7 +606,18 @@ class FuturesSpotPositionManager:
                 raise LiveExecutionError(f'Short order filled zero quantity on {d.short_exchange}')
         except Exception as exc:
             if short_order is None and long_order is not None:
-                await self._rollback_futures_open(long_exchange, opp.symbol, long_order, 'sell')
+                rolled_back = await self._rollback_futures_open(long_exchange, opp.symbol, long_order, 'sell')
+                if not rolled_back:
+                    raise SafetyViolationError(
+                        f'Critical rollback failure after long open on {d.long_exchange} for {opp.symbol}'
+                    ) from exc
+            elif long_order is not None and short_order is not None:
+                short_rolled_back = await self._rollback_futures_open(short_exchange, opp.symbol, short_order, 'buy')
+                long_rolled_back = await self._rollback_futures_open(long_exchange, opp.symbol, long_order, 'sell')
+                if not short_rolled_back or not long_rolled_back:
+                    raise SafetyViolationError(
+                        f'Critical rollback failure after partial futures-funding open for {opp.symbol}'
+                    ) from exc
             raise LiveExecutionError(str(exc)) from exc
 
         target_close_at = datetime.fromtimestamp(d.target_funding_time / 1000) if d.target_funding_time else None
@@ -659,103 +694,214 @@ class FuturesSpotPositionManager:
         spot_prices: dict[str, dict[str, float]],
         futures_prices: dict[str, dict[str, float]],
     ) -> list[tuple[FuturesSpotPosition | FuturesFundingPosition, VirtualTrade]]:
-        results = []
-        for symbol, pos in list(self._positions.items()):
-            if isinstance(pos, FuturesFundingPosition):
-                current_long = futures_prices.get(pos.long_exchange, {}).get(symbol)
-                current_short = futures_prices.get(pos.short_exchange, {}).get(symbol)
-                if current_long is None or current_short is None:
-                    continue
-                reason = self._funding_close_reason(pos)
-                if not reason:
-                    continue
-                long_exchange = self._futures_execution_exchanges.get(pos.long_exchange)
-                short_exchange = self._futures_execution_exchanges.get(pos.short_exchange)
-                if long_exchange is None or short_exchange is None:
-                    raise LiveExecutionError(
-                        f'Live close unavailable for route {pos.long_exchange}->{pos.short_exchange}'
-                    )
-                short_close = await short_exchange.create_market_order(
-                    symbol,
-                    'buy',
-                    pos.short_order_amount,
-                    reduce_only=True,
-                )
-                try:
-                    long_close = await long_exchange.create_market_order(
-                        symbol,
-                        'sell',
-                        pos.long_order_amount,
-                        reduce_only=True,
-                    )
-                except Exception as exc:
-                    await self._rollback_futures_close(short_exchange, symbol, pos.short_order_amount)
-                    raise LiveExecutionError(str(exc)) from exc
-                pos.close(
-                    long_close.average or current_long,
-                    short_close.average or current_short,
-                    reason,
-                )
-                trade = self._build_futures_funding_trade(pos, reason)
-            else:
-                current_spot = spot_prices.get(pos.spot_exchange, {}).get(symbol)
-                current_futures = futures_prices.get(pos.futures_exchange, {}).get(symbol)
-                if current_spot is None or current_futures is None:
-                    continue
-                current_basis_pct = (
-                    (current_futures - current_spot) / current_spot * 100
-                ) if current_spot > 0 else 999.0
-                reason = None
-                if abs(current_basis_pct) < FuturesSpotPosition.CLOSE_THRESHOLD_PERCENT:
-                    reason = f'Базис сошёлся к {current_basis_pct:.4f}%'
-                elif pos.hours_open() >= FuturesSpotPosition.MAX_HOLD_HOURS:
-                    reason = f'Таймаут {FuturesSpotPosition.MAX_HOLD_HOURS}ч'
-                if not reason:
-                    continue
-
-                spot_exchange = self._spot_execution_exchanges.get(pos.spot_exchange)
-                futures_exchange = self._futures_execution_exchanges.get(pos.futures_exchange)
-                if spot_exchange is None or futures_exchange is None:
-                    raise LiveExecutionError(
-                        f'Live close unavailable for route {pos.spot_exchange}->{pos.futures_exchange}'
-                    )
-
-                futures_close = None
-                try:
-                    futures_close = await futures_exchange.create_market_order(
+        async with self._execution_lock:
+            results = []
+            for symbol, pos in list(self._positions.items()):
+                if isinstance(pos, FuturesFundingPosition):
+                    current_long = futures_prices.get(pos.long_exchange, {}).get(symbol)
+                    current_short = futures_prices.get(pos.short_exchange, {}).get(symbol)
+                    if current_long is None or current_short is None:
+                        continue
+                    reason = self._funding_close_reason(pos)
+                    if not reason:
+                        continue
+                    long_exchange = self._futures_execution_exchanges.get(pos.long_exchange)
+                    short_exchange = self._futures_execution_exchanges.get(pos.short_exchange)
+                    if long_exchange is None or short_exchange is None:
+                        raise LiveExecutionError(
+                            f'Live close unavailable for route {pos.long_exchange}->{pos.short_exchange}'
+                        )
+                    short_close = await short_exchange.create_market_order(
                         symbol,
                         'buy',
-                        pos.futures_order_amount,
+                        pos.short_order_amount,
                         reduce_only=True,
                     )
-                except Exception as exc:
-                    if not self._is_futures_leg_absent_error(exc):
+                    try:
+                        long_close = await long_exchange.create_market_order(
+                            symbol,
+                            'sell',
+                            pos.long_order_amount,
+                            reduce_only=True,
+                        )
+                    except Exception as exc:
+                        rolled_back = await self._rollback_futures_close(short_exchange, symbol, pos.short_order_amount)
+                        if not rolled_back:
+                            raise SafetyViolationError(
+                                f'Critical rollback failure after partial futures-funding close for {symbol}'
+                            ) from exc
                         raise LiveExecutionError(str(exc)) from exc
-                try:
-                    spot_close = await spot_exchange.create_market_order(symbol, 'sell', pos.spot_order_amount)
-                except Exception as exc:
-                    if futures_close is not None:
-                        await self._rollback_futures_close(futures_exchange, symbol, pos.futures_order_amount)
-                    raise LiveExecutionError(str(exc)) from exc
+                    pos.close(
+                        long_close.average or current_long,
+                        short_close.average or current_short,
+                        reason,
+                    )
+                    trade = self._build_futures_funding_trade(pos, reason)
+                else:
+                    current_spot = spot_prices.get(pos.spot_exchange, {}).get(symbol)
+                    current_futures = futures_prices.get(pos.futures_exchange, {}).get(symbol)
+                    if current_spot is None or current_futures is None:
+                        continue
+                    current_basis_pct = (
+                        (current_futures - current_spot) / current_spot * 100
+                    ) if current_spot > 0 else 999.0
+                    reason = None
+                    if abs(current_basis_pct) < FuturesSpotPosition.CLOSE_THRESHOLD_PERCENT:
+                        reason = f'Базис сошёлся к {current_basis_pct:.4f}%'
+                    elif pos.hours_open() >= FuturesSpotPosition.MAX_HOLD_HOURS:
+                        reason = f'Таймаут {FuturesSpotPosition.MAX_HOLD_HOURS}ч'
+                    if not reason:
+                        continue
 
-                pos.close(
-                    spot_close.average or current_spot,
-                    futures_close.average or current_futures,
-                    reason,
+                    spot_exchange = self._spot_execution_exchanges.get(pos.spot_exchange)
+                    futures_exchange = self._futures_execution_exchanges.get(pos.futures_exchange)
+                    if spot_exchange is None or futures_exchange is None:
+                        raise LiveExecutionError(
+                            f'Live close unavailable for route {pos.spot_exchange}->{pos.futures_exchange}'
+                        )
+
+                    futures_close = None
+                    try:
+                        futures_close = await futures_exchange.create_market_order(
+                            symbol,
+                            'buy',
+                            pos.futures_order_amount,
+                            reduce_only=True,
+                        )
+                    except Exception as exc:
+                        if not self._is_futures_leg_absent_error(exc):
+                            raise LiveExecutionError(str(exc)) from exc
+                    try:
+                        spot_close = await spot_exchange.create_market_order(symbol, 'sell', pos.spot_order_amount)
+                    except Exception as exc:
+                        if futures_close is not None:
+                            rolled_back = await self._rollback_futures_close(
+                                futures_exchange,
+                                symbol,
+                                pos.futures_order_amount,
+                            )
+                            if not rolled_back:
+                                raise SafetyViolationError(
+                                    f'Critical rollback failure after partial futures-spot close for {symbol}'
+                                ) from exc
+                        else:
+                            raise SafetyViolationError(
+                                f'Critical close failure left naked spot on {pos.spot_exchange} for {symbol}'
+                            ) from exc
+                        raise LiveExecutionError(str(exc)) from exc
+
+                    pos.close(
+                        spot_close.average or current_spot,
+                        futures_close.average or current_futures,
+                        reason,
+                    )
+                    trade = self._build_futures_spot_trade(pos, reason)
+
+                del self._positions[symbol]
+                await self._open_position_store.delete(symbol)
+                await self._snapshot_repository.delete(symbol)
+                self._portfolio.add_trade(trade)
+                await self._repo.save(trade)
+                await self._analytics.record_closed_trade(
+                    build_closed_trade_analytics(trade, self._analytics_timezone)
                 )
-                trade = self._build_futures_spot_trade(pos, reason)
+                results.append((pos, trade))
 
-            del self._positions[symbol]
-            await self._open_position_store.delete(symbol)
-            await self._snapshot_repository.delete(symbol)
-            self._portfolio.add_trade(trade)
-            await self._repo.save(trade)
-            await self._analytics.record_closed_trade(
-                build_closed_trade_analytics(trade, self._analytics_timezone)
-            )
-            results.append((pos, trade))
+            return results
 
-        return results
+    async def reconcile_live_state(
+        self,
+        tracked_symbols: list[str],
+        spot_prices: dict[str, dict[str, float]],
+        futures_prices: dict[str, dict[str, float]],
+        orphan_notional_threshold_usdt: float,
+    ) -> list[str]:
+        async with self._execution_lock:
+            issues: list[str] = []
+            symbols = list(dict.fromkeys(tracked_symbols))
+            symbol_by_base = {symbol.split('/')[0]: symbol for symbol in symbols}
+            expected_spot: dict[str, dict[str, FuturesSpotPosition]] = {}
+            expected_futures: dict[str, dict[str, tuple[str, float]]] = {}
+
+            for position in self._positions.values():
+                if isinstance(position, FuturesFundingPosition):
+                    expected_futures.setdefault(position.long_exchange, {})[position.symbol] = (
+                        'long',
+                        position.long_order_amount,
+                    )
+                    expected_futures.setdefault(position.short_exchange, {})[position.symbol] = (
+                        'short',
+                        position.short_order_amount,
+                    )
+                    continue
+                expected_spot.setdefault(position.spot_exchange, {})[position.symbol] = position
+                expected_futures.setdefault(position.futures_exchange, {})[position.symbol] = (
+                    'short',
+                    position.futures_order_amount,
+                )
+
+            tracked_bases = list(symbol_by_base.keys())
+            for exchange_id, exchange in self._spot_execution_exchanges.items():
+                balances = await exchange.fetch_total_balances(tracked_bases)
+                expected_by_symbol = expected_spot.get(exchange_id, {})
+                for base_currency, total_balance in balances.items():
+                    symbol = symbol_by_base.get(base_currency)
+                    if symbol is None:
+                        continue
+                    expected_position = expected_by_symbol.get(symbol)
+                    price = self._lookup_price(symbol, exchange_id, spot_prices, futures_prices)
+                    notional = total_balance * price if price > 0 else 0.0
+                    if expected_position is None:
+                        if notional >= orphan_notional_threshold_usdt:
+                            issues.append(
+                                f'Orphan spot balance on {exchange_id} for {symbol}: actual={total_balance:.8f}'
+                            )
+                        continue
+                    tolerance = self._quantity_tolerance(expected_position.spot_order_amount)
+                    if abs(total_balance - expected_position.spot_order_amount) > tolerance:
+                        issues.append(
+                            f'Spot balance mismatch on {exchange_id} for {symbol}: '
+                            f'actual={total_balance:.8f} expected={expected_position.spot_order_amount:.8f}'
+                        )
+
+            for exchange_id, exchange in self._futures_execution_exchanges.items():
+                actual_positions = await exchange.fetch_futures_positions(symbols)
+                expected_positions = expected_futures.get(exchange_id, {})
+                for symbol, (expected_side, expected_amount) in expected_positions.items():
+                    actual = actual_positions.get(symbol)
+                    if actual is None:
+                        issues.append(
+                            f'Missing futures position on {exchange_id} for {symbol}: '
+                            f'expected_side={expected_side} expected={expected_amount:.8f}'
+                        )
+                        continue
+                    tolerance = self._quantity_tolerance(expected_amount)
+                    if actual.side != expected_side:
+                        issues.append(
+                            f'Futures side mismatch on {exchange_id} for {symbol}: '
+                            f'actual={actual.side} expected={expected_side}'
+                        )
+                    if abs(actual.base_amount - expected_amount) > tolerance:
+                        issues.append(
+                            f'Futures size mismatch on {exchange_id} for {symbol}: '
+                            f'actual={actual.base_amount:.8f} expected={expected_amount:.8f}'
+                        )
+                for symbol, actual in actual_positions.items():
+                    if symbol in expected_positions:
+                        continue
+                    price = (
+                        self._lookup_price(symbol, exchange_id, spot_prices, futures_prices)
+                        or actual.entry_price
+                        or 0.0
+                    )
+                    notional = actual.base_amount * price if price > 0 else 0.0
+                    if notional >= orphan_notional_threshold_usdt:
+                        issues.append(
+                            f'Orphan futures position on {exchange_id} for {symbol}: '
+                            f'side={actual.side} actual={actual.base_amount:.8f}'
+                        )
+
+            return issues
 
     async def restore_positions(
         self,
@@ -884,31 +1030,60 @@ class FuturesSpotPositionManager:
                 f'Futures market setup failed for {exchange.info.id} {symbol}: {exc}'
             ) from exc
 
-    async def _rollback_spot_open(self, exchange: IExchange, symbol: str, order) -> None:
+    async def _rollback_spot_open(self, exchange: IExchange, symbol: str, order) -> bool:
         rollback_amount = order.base_amount or order.filled or order.amount
         if rollback_amount <= 0:
-            return
+            return True
         try:
             await exchange.create_market_order(symbol, 'sell', rollback_amount)
+            return True
         except Exception:
-            pass
+            return False
 
-    async def _rollback_futures_open(self, exchange: IExchange, symbol: str, order, side: str) -> None:
+    async def _rollback_futures_open(self, exchange: IExchange, symbol: str, order, side: str) -> bool:
         rollback_amount = order.filled or order.amount
         if rollback_amount <= 0:
-            return
+            return True
         try:
             await exchange.create_market_order(symbol, side, rollback_amount, reduce_only=True)
+            return True
         except Exception:
-            pass
+            return False
 
-    async def _rollback_futures_close(self, exchange: IExchange, symbol: str, amount: float) -> None:
+    async def _rollback_futures_close(self, exchange: IExchange, symbol: str, amount: float) -> bool:
         if amount <= 0:
-            return
+            return True
         try:
             await exchange.create_market_order(symbol, 'sell', amount)
+            return True
         except Exception:
-            pass
+            return False
+
+    def _quantity_tolerance(self, amount: float) -> float:
+        return max(abs(amount) * 0.002, 1e-8)
+
+    def _lookup_price(
+        self,
+        symbol: str,
+        exchange_id: str,
+        spot_prices: dict[str, dict[str, float]],
+        futures_prices: dict[str, dict[str, float]],
+    ) -> float:
+        direct_spot = spot_prices.get(exchange_id, {}).get(symbol)
+        if direct_spot:
+            return direct_spot
+        direct_futures = futures_prices.get(exchange_id, {}).get(symbol)
+        if direct_futures:
+            return direct_futures
+        for exchange_prices in spot_prices.values():
+            price = exchange_prices.get(symbol)
+            if price:
+                return price
+        for exchange_prices in futures_prices.values():
+            price = exchange_prices.get(symbol)
+            if price:
+                return price
+        return 0.0
 
     @property
     def open_positions(self) -> list[FuturesSpotPosition | FuturesFundingPosition]:

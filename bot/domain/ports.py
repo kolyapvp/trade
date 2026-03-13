@@ -52,6 +52,15 @@ class ExchangeOrder:
     reduce_only: bool = False
 
 
+@dataclass(frozen=True)
+class ExchangePosition:
+    symbol: str
+    side: str
+    contracts: float
+    base_amount: float
+    entry_price: float = 0.0
+
+
 class IExchange(abc.ABC):
     info: ExchangeInfo
 
@@ -84,6 +93,10 @@ class IExchange(abc.ABC):
         ...
 
     @abc.abstractmethod
+    async def fetch_total_balances(self, currencies: list[str]) -> dict[str, float]:
+        ...
+
+    @abc.abstractmethod
     async def get_trading_fee(self, symbol: str) -> Fee:
         ...
 
@@ -113,6 +126,10 @@ class IExchange(abc.ABC):
         margin_mode: str,
         one_way: bool = True,
     ) -> None:
+        ...
+
+    @abc.abstractmethod
+    async def fetch_futures_positions(self, symbols: list[str]) -> dict[str, ExchangePosition]:
         ...
 
     @abc.abstractmethod

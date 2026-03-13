@@ -6,7 +6,7 @@ from typing import Optional
 
 import ccxt.async_support as ccxt
 
-from ..domain.ports import IExchange, ExchangeInfo, ExchangeOrder, Ticker, FuturesTicker
+from ..domain.ports import IExchange, ExchangeInfo, ExchangeOrder, ExchangePosition, Ticker, FuturesTicker
 from ..domain.value_objects import Fee, OrderBook, OrderBookLevel
 
 
@@ -174,6 +174,18 @@ class CcxtExchangeAdapter(IExchange):
             total_balance_usdt += amount * float(price)
         return total_balance_usdt
 
+    async def fetch_total_balances(self, currencies: list[str]) -> dict[str, float]:
+        balance = await self._exchange.fetch_balance()
+        totals = balance.get('total') or {}
+        result: dict[str, float] = {}
+        for currency in currencies:
+            value = totals.get(currency)
+            if value is None:
+                account = balance.get(currency) or {}
+                value = account.get('total', 0.0)
+            result[currency] = float(value or 0.0)
+        return result
+
     async def get_trading_fee(self, symbol: str) -> Fee:
         _, market = await self._get_market(symbol)
         maker = market.get('maker')
@@ -274,6 +286,10 @@ class CcxtExchangeAdapter(IExchange):
                 except json.JSONDecodeError:
                     parsed = None
             if isinstance(parsed, dict):
+                fee_coin = parsed.get('feeCoin')
+                total_fee = parsed.get('totalFee')
+                if fee_coin is not None and total_fee not in {None, ''}:
+                    return str(fee_coin), abs(float(total_fee))
                 for key, item in parsed.items():
                     if key == 'newFees' or not isinstance(item, dict):
                         continue
@@ -348,6 +364,41 @@ class CcxtExchangeAdapter(IExchange):
             raise RuntimeError(
                 f'Leverage mismatch on {self.info.id} for {market_symbol}: {verified_leverage}'
             )
+
+    async def fetch_futures_positions(self, symbols: list[str]) -> dict[str, ExchangePosition]:
+        if not self.info.supports_futures:
+            return {}
+        result: dict[str, ExchangePosition] = {}
+        if not symbols:
+            return result
+        await self._ensure_markets_loaded()
+        prepared_symbols: list[str] = []
+        requested_by_prepared: dict[str, str] = {}
+        subtype = None
+        for symbol in symbols:
+            market_symbol, market = await self._get_market(symbol)
+            prepared_symbols.append(market_symbol)
+            requested_by_prepared[market_symbol] = symbol
+            if subtype is None:
+                subtype = 'linear' if market.get('linear') else 'inverse'
+        params = {'subType': subtype} if subtype else {}
+        positions = await self._exchange.fetch_positions(prepared_symbols, params)
+        for position in positions:
+            contracts = float(position.get('contracts') or 0.0)
+            if abs(contracts) <= 0:
+                continue
+            market_symbol = str(position.get('symbol') or '')
+            requested_symbol = requested_by_prepared.get(market_symbol, market_symbol)
+            base_amount = await self.convert_order_amount_to_base(requested_symbol, abs(contracts))
+            side = str(position.get('side') or '').lower()
+            result[requested_symbol] = ExchangePosition(
+                symbol=requested_symbol,
+                side=side,
+                contracts=abs(contracts),
+                base_amount=base_amount,
+                entry_price=float(position.get('entryPrice') or 0.0),
+            )
+        return result
 
     async def is_available(self) -> bool:
         try:

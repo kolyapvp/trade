@@ -297,6 +297,9 @@ async def bootstrap() -> None:
             live_spot_exchange_ids=set(live_spot_exchange_map),
             live_futures_exchange_ids=set(live_futures_exchange_map),
             balance_exchanges=balance_exchange_map,
+            max_open_positions=config.max_open_positions,
+            live_reconcile_interval_seconds=config.live_reconcile_interval_seconds,
+            live_orphan_notional_threshold_usdt=config.live_orphan_notional_threshold_usdt,
         )
 
         bot.set_scan_handler(lambda opps, dur: (

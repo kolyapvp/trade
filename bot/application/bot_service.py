@@ -8,7 +8,7 @@ from typing import Callable, Optional
 
 from .use_cases import (
     ScanOpportunitiesUseCase, ExecuteDemoTradeUseCase,
-    GenerateReportUseCase, LiveExecutionError, ScanConfig, FuturesSpotPositionManager,
+    GenerateReportUseCase, LiveExecutionError, SafetyViolationError, ScanConfig, FuturesSpotPositionManager,
 )
 from ..domain.entities import ArbitrageOpportunity, VirtualTrade, Portfolio, FuturesSpotPosition, FuturesFundingPosition
 from ..domain.entities import CrossExchangeDetails, TriangularDetails, FuturesSpotDetails, FuturesFundingDetails
@@ -57,6 +57,9 @@ class ArbitrageBotService:
         live_spot_exchange_ids: Optional[set[str]] = None,
         live_futures_exchange_ids: Optional[set[str]] = None,
         balance_exchanges: Optional[dict[str, IExchange]] = None,
+        max_open_positions: int = 1,
+        live_reconcile_interval_seconds: int = 30,
+        live_orphan_notional_threshold_usdt: float = 5.0,
     ):
         self._scanner = scanner
         self._executor = executor
@@ -72,6 +75,9 @@ class ArbitrageBotService:
         self._live_spot_exchange_ids = live_spot_exchange_ids or set()
         self._live_futures_exchange_ids = live_futures_exchange_ids or set()
         self._balance_exchanges = balance_exchanges or {}
+        self._max_open_positions = max(max_open_positions, 1)
+        self._live_reconcile_interval_seconds = max(live_reconcile_interval_seconds, 5)
+        self._live_orphan_notional_threshold_usdt = max(live_orphan_notional_threshold_usdt, 0.0)
         self._running = False
         self._stats = BotStats()
         self._on_opportunity: Optional[Callable] = None
@@ -80,6 +86,8 @@ class ArbitrageBotService:
         self._on_position_closed: Optional[Callable] = None
         self._deployment_state = DeploymentState()
         self._last_balance_sync_at: Optional[datetime] = None
+        self._last_reconcile_at: Optional[datetime] = None
+        self._panic_reason: Optional[str] = None
 
     def set_opportunity_handler(self, handler: Callable) -> None:
         self._on_opportunity = handler
@@ -384,7 +392,44 @@ class ArbitrageBotService:
 
     async def _allows_new_trades(self) -> bool:
         state = await self._refresh_deployment_state()
-        return not state.is_draining
+        if self._panic_reason:
+            return False
+        if state.is_draining:
+            return False
+        return len(self._position_manager.open_positions) < self._max_open_positions
+
+    def _activate_panic(self, reason: str) -> None:
+        if self._panic_reason == reason:
+            return
+        if self._panic_reason is None:
+            self._panic_reason = reason
+        else:
+            self._panic_reason = f'{self._panic_reason} | {reason}'
+        logger.error('panic_mode activated reason=%s', reason)
+        self._metrics.record_error('panic')
+        self._stats.errors.append(f'PANIC: {reason}')
+        self._stats.errors = self._stats.errors[-10:]
+        if self._on_error:
+            self._on_error(f'PANIC: {reason}')
+
+    async def _maybe_reconcile_live_state(
+        self,
+        spot_prices: dict[str, dict[str, float]],
+        futures_prices: dict[str, dict[str, float]],
+    ) -> list[str]:
+        if self._mode != 'real':
+            return []
+        now = datetime.now()
+        if self._last_reconcile_at and (now - self._last_reconcile_at).total_seconds() < self._live_reconcile_interval_seconds:
+            return []
+        issues = await self._position_manager.reconcile_live_state(
+            tracked_symbols=self._scan_config.symbols,
+            spot_prices=spot_prices,
+            futures_prices=futures_prices,
+            orphan_notional_threshold_usdt=self._live_orphan_notional_threshold_usdt,
+        )
+        self._last_reconcile_at = now
+        return issues
 
     async def _sync_balances(self) -> None:
         if self._mode != 'real' or not self._balance_exchanges:
@@ -424,6 +469,18 @@ class ArbitrageBotService:
             ))
             self._metrics.set_open_positions(len(self._position_manager.open_positions))
             await self._sync_balances()
+
+            reconciliation_issues = await self._maybe_reconcile_live_state(
+                result.spot_prices,
+                result.futures_prices,
+            )
+            if reconciliation_issues:
+                for issue in reconciliation_issues:
+                    self._activate_panic(issue)
+                return
+
+            if self._panic_reason:
+                return
 
             if result.errors:
                 self._stats.errors = result.errors[-10:]
@@ -515,6 +572,14 @@ class ArbitrageBotService:
                     if opp.strategy in {'futures_spot', 'futures_funding'}:
                         if self._position_manager.has_open_position(opp.symbol):
                             continue
+                        if len(self._position_manager.open_positions) >= self._max_open_positions:
+                            logger.info(
+                                'max_open_positions reached open_positions=%s limit=%s skip_symbol=%s',
+                                len(self._position_manager.open_positions),
+                                self._max_open_positions,
+                                opp.symbol,
+                            )
+                            break
                         if self._mode == 'demo':
                             await self._position_manager.open_position(opp)
                             self._metrics.set_open_positions(len(self._position_manager.open_positions))
@@ -591,8 +656,14 @@ class ArbitrageBotService:
                 except LiveExecutionError as e:
                     msg = f'Live execution error: {e}'
                     self._stats.errors.append(msg)
+                    self._stats.errors = self._stats.errors[-10:]
                     logger.exception(msg)
                     self._metrics.record_error('live_execution')
+                    if isinstance(e, SafetyViolationError):
+                        self._activate_panic(str(e))
+                        if self._on_error:
+                            self._on_error(msg)
+                        break
                     if self._on_error:
                         self._on_error(msg)
                     continue
