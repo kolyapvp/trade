@@ -195,6 +195,13 @@ async def bootstrap() -> None:
             for exchange in active_futures
             if has_private_api(exchange.info.id)
         }
+        balance_exchange_map = {
+            exchange_id: exchange
+            for exchange_id, exchange in {
+                **live_spot_exchange_map,
+                **live_futures_exchange_map,
+            }.items()
+        }
         if config.mode == 'real':
             live_spot_labels = ', '.join(sorted(live_spot_exchange_map)) or 'нет'
             live_futures_labels = ', '.join(sorted(live_futures_exchange_map)) or 'нет'
@@ -289,6 +296,7 @@ async def bootstrap() -> None:
             alert_service=alert_service,
             live_spot_exchange_ids=set(live_spot_exchange_map),
             live_futures_exchange_ids=set(live_futures_exchange_map),
+            balance_exchanges=balance_exchange_map,
         )
 
         bot.set_scan_handler(lambda opps, dur: (

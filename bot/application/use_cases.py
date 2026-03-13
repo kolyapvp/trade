@@ -527,7 +527,7 @@ class FuturesSpotPositionManager:
             futures_taker_fee=d.futures_taker_fee,
             spot_base_quantity=spot_order.base_amount,
             futures_base_quantity=futures_order.base_amount,
-            spot_order_amount=spot_order.filled or spot_order.amount,
+            spot_order_amount=spot_order.base_amount,
             futures_order_amount=futures_order.filled or futures_order.amount,
         )
         self._positions[opp.symbol] = pos
@@ -720,16 +720,22 @@ class FuturesSpotPositionManager:
                         f'Live close unavailable for route {pos.spot_exchange}->{pos.futures_exchange}'
                     )
 
-                futures_close = await futures_exchange.create_market_order(
-                    symbol,
-                    'buy',
-                    pos.futures_order_amount,
-                    reduce_only=True,
-                )
+                futures_close = None
+                try:
+                    futures_close = await futures_exchange.create_market_order(
+                        symbol,
+                        'buy',
+                        pos.futures_order_amount,
+                        reduce_only=True,
+                    )
+                except Exception as exc:
+                    if not self._is_futures_leg_absent_error(exc):
+                        raise LiveExecutionError(str(exc)) from exc
                 try:
                     spot_close = await spot_exchange.create_market_order(symbol, 'sell', pos.spot_order_amount)
                 except Exception as exc:
-                    await self._rollback_futures_close(futures_exchange, symbol, pos.futures_order_amount)
+                    if futures_close is not None:
+                        await self._rollback_futures_close(futures_exchange, symbol, pos.futures_order_amount)
                     raise LiveExecutionError(str(exc)) from exc
 
                 pos.close(
@@ -781,6 +787,10 @@ class FuturesSpotPositionManager:
         snapshot = position.to_snapshot()
         await self._open_position_store.save(snapshot)
         await self._snapshot_repository.upsert(snapshot)
+
+    def _is_futures_leg_absent_error(self, exc: Exception) -> bool:
+        message = str(exc).lower()
+        return 'current position is zero' in message or 'cannot fix reduce-only' in message
 
     def _funding_close_reason(self, position: FuturesFundingPosition) -> Optional[str]:
         if position.target_close_at and datetime.now() >= position.target_close_at:

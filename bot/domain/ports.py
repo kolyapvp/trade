@@ -80,6 +80,10 @@ class IExchange(abc.ABC):
         ...
 
     @abc.abstractmethod
+    async def fetch_total_balance_usdt(self, quote_currency: str = 'USDT') -> float:
+        ...
+
+    @abc.abstractmethod
     async def get_trading_fee(self, symbol: str) -> Fee:
         ...
 
@@ -222,6 +226,14 @@ class IMetricsService(abc.ABC):
 
     @abc.abstractmethod
     def set_open_positions(self, total: int) -> None:
+        ...
+
+    @abc.abstractmethod
+    def set_exchange_balance(self, exchange: str, total_balance_usdt: float) -> None:
+        ...
+
+    @abc.abstractmethod
+    def set_total_balance(self, total_balance_usdt: float) -> None:
         ...
 
     @abc.abstractmethod

@@ -17,6 +17,7 @@ from ..domain.ports import (
     IAlertService,
     IDeploymentStateRepository,
     IMetricsService,
+    IExchange,
     ScanTelemetry,
     SignalTelemetry,
     TradeAlert,
@@ -55,6 +56,7 @@ class ArbitrageBotService:
         alert_service: Optional[IAlertService] = None,
         live_spot_exchange_ids: Optional[set[str]] = None,
         live_futures_exchange_ids: Optional[set[str]] = None,
+        balance_exchanges: Optional[dict[str, IExchange]] = None,
     ):
         self._scanner = scanner
         self._executor = executor
@@ -69,6 +71,7 @@ class ArbitrageBotService:
         self._alert_service = alert_service
         self._live_spot_exchange_ids = live_spot_exchange_ids or set()
         self._live_futures_exchange_ids = live_futures_exchange_ids or set()
+        self._balance_exchanges = balance_exchanges or {}
         self._running = False
         self._stats = BotStats()
         self._on_opportunity: Optional[Callable] = None
@@ -76,6 +79,7 @@ class ArbitrageBotService:
         self._on_error: Optional[Callable] = None
         self._on_position_closed: Optional[Callable] = None
         self._deployment_state = DeploymentState()
+        self._last_balance_sync_at: Optional[datetime] = None
 
     def set_opportunity_handler(self, handler: Callable) -> None:
         self._on_opportunity = handler
@@ -382,6 +386,28 @@ class ArbitrageBotService:
         state = await self._refresh_deployment_state()
         return not state.is_draining
 
+    async def _sync_balances(self) -> None:
+        if self._mode != 'real' or not self._balance_exchanges:
+            return
+        now = datetime.now()
+        if self._last_balance_sync_at and (now - self._last_balance_sync_at).total_seconds() < 30:
+            return
+        total_balance_usdt = 0.0
+        successful = 0
+        for exchange_id, exchange in self._balance_exchanges.items():
+            try:
+                exchange_balance = await exchange.fetch_total_balance_usdt()
+            except Exception as exc:
+                logger.warning('balance_sync_error exchange=%s error=%s', exchange_id, exc)
+                self._metrics.record_error('balance', exchange=exchange_id)
+                continue
+            self._metrics.set_exchange_balance(exchange_id, exchange_balance)
+            total_balance_usdt += exchange_balance
+            successful += 1
+        if successful > 0:
+            self._metrics.set_total_balance(total_balance_usdt)
+            self._last_balance_sync_at = now
+
     async def _run_cycle(self) -> None:
         try:
             await self._refresh_deployment_state()
@@ -397,6 +423,7 @@ class ArbitrageBotService:
                 errors_count=len(result.errors),
             ))
             self._metrics.set_open_positions(len(self._position_manager.open_positions))
+            await self._sync_balances()
 
             if result.errors:
                 self._stats.errors = result.errors[-10:]

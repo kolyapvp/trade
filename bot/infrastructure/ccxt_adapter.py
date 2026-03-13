@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Optional
 
 import ccxt.async_support as ccxt
@@ -144,6 +145,27 @@ class CcxtExchangeAdapter(IExchange):
             value = account.get('free', 0.0)
         return float(value or 0.0)
 
+    async def fetch_total_balance_usdt(self, quote_currency: str = 'USDT') -> float:
+        balance = await self._exchange.fetch_balance()
+        totals = balance.get('total') or {}
+        total_balance_usdt = 0.0
+        for currency, raw_amount in totals.items():
+            amount = float(raw_amount or 0.0)
+            if amount <= 0:
+                continue
+            if currency == quote_currency:
+                total_balance_usdt += amount
+                continue
+            conversion_symbol = await self._find_conversion_symbol(currency, quote_currency)
+            if conversion_symbol is None:
+                continue
+            ticker = await self._exchange.fetch_ticker(conversion_symbol)
+            price = ticker.get('last') or ticker.get('bid') or ticker.get('ask')
+            if price is None:
+                continue
+            total_balance_usdt += amount * float(price)
+        return total_balance_usdt
+
     async def get_trading_fee(self, symbol: str) -> Fee:
         _, market = await self._get_market(symbol)
         maker = market.get('maker')
@@ -182,16 +204,32 @@ class CcxtExchangeAdapter(IExchange):
         reduce_only: bool = False,
     ) -> ExchangeOrder:
         market_symbol, market = await self._get_market(symbol)
+        precise_amount = float(self._exchange.amount_to_precision(market_symbol, amount))
         params = {'reduceOnly': True} if reduce_only else {}
-        raw = await self._exchange.create_order(market_symbol, 'market', side, amount, None, params)
-        filled = float(raw.get('filled') or raw.get('amount') or amount or 0.0)
+        price = None
+        requires_price_for_market_buy = (
+            side == 'buy'
+            and not bool(market.get('contract'))
+            and bool(self._exchange.options.get('createMarketBuyOrderRequiresPrice'))
+        )
+        if requires_price_for_market_buy:
+            ticker = await self._exchange.fetch_ticker(market_symbol)
+            raw_price = ticker.get('ask') or ticker.get('last') or ticker.get('bid')
+            if raw_price is None:
+                raise RuntimeError(f'Cannot determine price for market buy on {self.info.id} {market_symbol}')
+            price = float(self._exchange.price_to_precision(market_symbol, raw_price))
+        raw = await self._exchange.create_order(market_symbol, 'market', side, precise_amount, price, params)
+        filled = float(raw.get('filled') or raw.get('amount') or precise_amount or 0.0)
         base_amount = await self.convert_order_amount_to_base(symbol, filled)
+        fee_currency, fee_cost = self._extract_order_fee(raw)
+        if side == 'buy' and not bool(market.get('contract')) and fee_currency == market.get('base'):
+            base_amount = max(base_amount - fee_cost, 0.0)
         return ExchangeOrder(
             id=str(raw.get('id') or ''),
             symbol=market_symbol,
             side=str(raw.get('side') or side),
             type=str(raw.get('type') or 'market'),
-            amount=float(raw.get('amount') or amount or 0.0),
+            amount=float(raw.get('amount') or precise_amount or 0.0),
             filled=filled,
             base_amount=base_amount,
             average=float(raw.get('average') or raw.get('price') or 0.0),
@@ -199,6 +237,45 @@ class CcxtExchangeAdapter(IExchange):
             status=str(raw.get('status') or 'open'),
             reduce_only=reduce_only and bool(market.get('contract')),
         )
+
+    def _extract_order_fee(self, raw: dict) -> tuple[str | None, float]:
+        fee = raw.get('fee')
+        if isinstance(fee, dict):
+            currency = fee.get('currency')
+            cost = fee.get('cost')
+            if currency is not None and cost is not None:
+                return str(currency), abs(float(cost))
+
+        fees = raw.get('fees')
+        if isinstance(fees, list):
+            for item in fees:
+                if not isinstance(item, dict):
+                    continue
+                currency = item.get('currency')
+                cost = item.get('cost')
+                if currency is not None and cost is not None:
+                    return str(currency), abs(float(cost))
+
+        info = raw.get('info') or {}
+        fee_detail = info.get('feeDetail')
+        if fee_detail:
+            parsed = fee_detail
+            if isinstance(parsed, str):
+                try:
+                    parsed = json.loads(parsed)
+                except json.JSONDecodeError:
+                    parsed = None
+            if isinstance(parsed, dict):
+                for key, item in parsed.items():
+                    if key == 'newFees' or not isinstance(item, dict):
+                        continue
+                    currency = item.get('feeCoinCode') or key
+                    total_fee = item.get('totalFee')
+                    if currency is None or total_fee is None:
+                        continue
+                    return str(currency), abs(float(total_fee))
+
+        return None, 0.0
 
     async def prepare_futures_execution(
         self,
@@ -308,6 +385,20 @@ class CcxtExchangeAdapter(IExchange):
         await self._ensure_markets_loaded()
         market_symbol = await self._resolve_alias_symbol(symbol)
         return market_symbol, self._exchange.market(market_symbol)
+
+    async def _find_conversion_symbol(self, base_currency: str, quote_currency: str) -> str | None:
+        await self._ensure_markets_loaded()
+        preferred_symbol = None
+        for market_symbol, market in self._exchange.markets.items():
+            if market.get('base') != base_currency or market.get('quote') != quote_currency:
+                continue
+            if not bool(market.get('active', True)):
+                continue
+            if not bool(market.get('contract')):
+                return market_symbol
+            if preferred_symbol is None:
+                preferred_symbol = market_symbol
+        return preferred_symbol
 
     async def _read_futures_state(self, market_symbol: str, market: dict) -> dict[str, float | str | bool | None]:
         params = {'subType': 'linear' if market.get('linear') else 'inverse'}

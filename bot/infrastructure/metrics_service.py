@@ -20,6 +20,12 @@ class NullMetricsService(IMetricsService):
     def record_scan(self, telemetry: ScanTelemetry) -> None:
         return
 
+    def set_exchange_balance(self, exchange: str, total_balance_usdt: float) -> None:
+        return
+
+    def set_total_balance(self, total_balance_usdt: float) -> None:
+        return
+
     def record_signal(self, telemetry: SignalTelemetry) -> None:
         return
 
@@ -113,6 +119,16 @@ class PrometheusMetricsService(IMetricsService):
             'Open futures-spot positions',
             ('mode',),
         )
+        self._exchange_balance_usdt = Gauge(
+            'tradebot_exchange_balance_usdt',
+            'Estimated total account balance in USDT by exchange',
+            ('mode', 'exchange'),
+        )
+        self._total_balance_usdt = Gauge(
+            'tradebot_total_balance_usdt',
+            'Estimated total account balance in USDT across tracked exchanges',
+            ('mode',),
+        )
         self._last_scan_duration_ms = Gauge(
             'tradebot_last_scan_duration_ms',
             'Duration of the most recent completed scan in milliseconds',
@@ -140,6 +156,12 @@ class PrometheusMetricsService(IMetricsService):
 
     def set_open_positions(self, total: int) -> None:
         self._open_positions.labels(mode=self._mode).set(total)
+
+    def set_exchange_balance(self, exchange: str, total_balance_usdt: float) -> None:
+        self._exchange_balance_usdt.labels(mode=self._mode, exchange=exchange).set(total_balance_usdt)
+
+    def set_total_balance(self, total_balance_usdt: float) -> None:
+        self._total_balance_usdt.labels(mode=self._mode).set(total_balance_usdt)
 
     def record_scan(self, telemetry: ScanTelemetry) -> None:
         self._scan_total.labels(mode=self._mode).inc()
