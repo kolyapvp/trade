@@ -716,7 +716,9 @@
             "mode": "palette-classic"
           },
           "mappings": [],
-          "unit": "currencyUSD"
+          "max": 1,
+          "min": 0,
+          "unit": "percentunit"
         },
         "overrides": []
       },
@@ -747,14 +749,14 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "tradebot_exchange_balance_usdt{mode=~\"$mode\"}",
+          "expr": "tradebot_exchange_balance_usdt{mode=~\"$mode\"} / scalar(clamp_min(sum(tradebot_exchange_balance_usdt{mode=~\"$mode\"}), 1))",
           "instant": true,
           "legendFormat": "{{exchange}}",
           "range": false,
           "refId": "A"
         }
       ],
-      "title": "Balance by Exchange",
+      "title": "Balance Share by Exchange",
       "type": "bargauge"
     }
   ],

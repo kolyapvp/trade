@@ -195,13 +195,11 @@ async def bootstrap() -> None:
             for exchange in active_futures
             if has_private_api(exchange.info.id)
         }
-        balance_exchange_map = {
-            exchange_id: exchange
-            for exchange_id, exchange in {
-                **live_spot_exchange_map,
-                **live_futures_exchange_map,
-            }.items()
-        }
+        balance_exchange_map: dict[str, list] = {}
+        for exchange_id, exchange in live_spot_exchange_map.items():
+            balance_exchange_map.setdefault(exchange_id, []).append(exchange)
+        for exchange_id, exchange in live_futures_exchange_map.items():
+            balance_exchange_map.setdefault(exchange_id, []).append(exchange)
         if config.mode == 'real':
             live_spot_labels = ', '.join(sorted(live_spot_exchange_map)) or 'нет'
             live_futures_labels = ', '.join(sorted(live_futures_exchange_map)) or 'нет'

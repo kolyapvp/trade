@@ -56,7 +56,7 @@ class ArbitrageBotService:
         alert_service: Optional[IAlertService] = None,
         live_spot_exchange_ids: Optional[set[str]] = None,
         live_futures_exchange_ids: Optional[set[str]] = None,
-        balance_exchanges: Optional[dict[str, IExchange]] = None,
+        balance_exchanges: Optional[dict[str, list[IExchange]]] = None,
         max_open_positions: int = 1,
         max_daily_loss_usdt: float = 20.0,
         live_reconcile_interval_seconds: int = 30,
@@ -535,12 +535,19 @@ class ArbitrageBotService:
             return
         total_balance_usdt = 0.0
         successful = 0
-        for exchange_id, exchange in self._balance_exchanges.items():
-            try:
-                exchange_balance = await exchange.fetch_total_balance_usdt()
-            except Exception as exc:
-                logger.warning('balance_sync_error exchange=%s error=%s', exchange_id, exc)
-                self._metrics.record_error('balance', exchange=exchange_id)
+        for exchange_id, exchanges in self._balance_exchanges.items():
+            exchange_balance = 0.0
+            exchange_successful = 0
+            for exchange in exchanges:
+                try:
+                    source_balance = await exchange.fetch_total_balance_usdt()
+                except Exception as exc:
+                    logger.warning('balance_sync_error exchange=%s error=%s', exchange_id, exc)
+                    self._metrics.record_error('balance', exchange=exchange_id)
+                    continue
+                exchange_balance += source_balance
+                exchange_successful += 1
+            if exchange_successful == 0:
                 continue
             self._metrics.set_exchange_balance(exchange_id, exchange_balance)
             total_balance_usdt += exchange_balance
