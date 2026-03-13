@@ -180,6 +180,10 @@ class IAlertService(abc.ABC):
     async def send_trade_alert(self, alert: TradeAlert) -> None:
         ...
 
+    @abc.abstractmethod
+    async def send_text_alert(self, text: str) -> None:
+        ...
+
 
 @dataclass(frozen=True)
 class ScanTelemetry:

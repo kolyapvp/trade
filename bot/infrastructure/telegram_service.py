@@ -20,6 +20,11 @@ class TelegramAlertService(IAlertService):
         text = self._build_message(alert)
         await asyncio.to_thread(self._post, text)
 
+    async def send_text_alert(self, text: str) -> None:
+        if not self._bot_token or not self._chat_id:
+            return
+        await asyncio.to_thread(self._post, text)
+
     def _build_message(self, alert: TradeAlert) -> str:
         if alert.alert_type == 'closed':
             return self._build_closed_message(alert)

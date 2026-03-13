@@ -274,6 +274,7 @@ async def bootstrap() -> None:
             futures_margin_mode=config.futures_margin_mode,
             spot_execution_exchanges=live_spot_exchange_map,
             futures_execution_exchanges=live_futures_exchange_map,
+            max_close_failures=config.max_close_failures,
         )
         reporter = GenerateReportUseCase(trade_repository, portfolio)
         reporter.set_position_manager(position_manager)
@@ -298,6 +299,7 @@ async def bootstrap() -> None:
             live_futures_exchange_ids=set(live_futures_exchange_map),
             balance_exchanges=balance_exchange_map,
             max_open_positions=config.max_open_positions,
+            max_daily_loss_usdt=config.max_daily_loss_usdt,
             live_reconcile_interval_seconds=config.live_reconcile_interval_seconds,
             live_orphan_notional_threshold_usdt=config.live_orphan_notional_threshold_usdt,
         )

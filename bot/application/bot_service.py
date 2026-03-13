@@ -58,6 +58,7 @@ class ArbitrageBotService:
         live_futures_exchange_ids: Optional[set[str]] = None,
         balance_exchanges: Optional[dict[str, IExchange]] = None,
         max_open_positions: int = 1,
+        max_daily_loss_usdt: float = 20.0,
         live_reconcile_interval_seconds: int = 30,
         live_orphan_notional_threshold_usdt: float = 5.0,
     ):
@@ -76,6 +77,7 @@ class ArbitrageBotService:
         self._live_futures_exchange_ids = live_futures_exchange_ids or set()
         self._balance_exchanges = balance_exchanges or {}
         self._max_open_positions = max(max_open_positions, 1)
+        self._max_daily_loss_usdt = max(max_daily_loss_usdt, 0.0)
         self._live_reconcile_interval_seconds = max(live_reconcile_interval_seconds, 5)
         self._live_orphan_notional_threshold_usdt = max(live_orphan_notional_threshold_usdt, 0.0)
         self._running = False
@@ -88,6 +90,9 @@ class ArbitrageBotService:
         self._last_balance_sync_at: Optional[datetime] = None
         self._last_reconcile_at: Optional[datetime] = None
         self._panic_reason: Optional[str] = None
+        self._failed_futures_routes: dict[str, datetime] = {}
+        self._failed_route_ttl_seconds = 3600
+        self._daily_loss_blocked = False
 
     def set_opportunity_handler(self, handler: Callable) -> None:
         self._on_opportunity = handler
@@ -396,6 +401,24 @@ class ArbitrageBotService:
             return False
         if state.is_draining:
             return False
+        if self._max_daily_loss_usdt > 0:
+            profit_last_24h = self._portfolio.profit_last_24h()
+            breached = profit_last_24h < -self._max_daily_loss_usdt
+            if breached and not self._daily_loss_blocked:
+                logger.warning(
+                    'daily_loss_limit_reached profit_last_24h=%.4f limit=%.4f',
+                    profit_last_24h,
+                    self._max_daily_loss_usdt,
+                )
+            if not breached and self._daily_loss_blocked:
+                logger.info(
+                    'daily_loss_limit_cleared profit_last_24h=%.4f limit=%.4f',
+                    profit_last_24h,
+                    self._max_daily_loss_usdt,
+                )
+            self._daily_loss_blocked = breached
+            if breached:
+                return False
         return len(self._position_manager.open_positions) < self._max_open_positions
 
     def _activate_panic(self, reason: str) -> None:
@@ -411,6 +434,79 @@ class ArbitrageBotService:
         self._stats.errors = self._stats.errors[-10:]
         if self._on_error:
             self._on_error(f'PANIC: {reason}')
+        if self._alert_service:
+            asyncio.create_task(self._alert_service.send_text_alert(f'PANIC: {reason}'))
+
+    def _failed_route_key(self, exchange_id: str, symbol: str) -> str:
+        return f'{exchange_id}:{symbol}'
+
+    def _prune_failed_futures_routes(self) -> None:
+        now = datetime.now()
+        expired = [
+            route_key
+            for route_key, blocked_until in self._failed_futures_routes.items()
+            if blocked_until <= now
+        ]
+        for route_key in expired:
+            del self._failed_futures_routes[route_key]
+
+    def _block_failed_futures_route(self, exchange_id: str, symbol: str) -> None:
+        route_key = self._failed_route_key(exchange_id, symbol)
+        blocked_until = datetime.now().timestamp() + self._failed_route_ttl_seconds
+        self._failed_futures_routes[route_key] = datetime.fromtimestamp(blocked_until)
+        logger.warning(
+            'blocked_futures_route route=%s ttl_seconds=%s',
+            route_key,
+            self._failed_route_ttl_seconds,
+        )
+
+    def _is_failed_futures_route(self, exchange_id: str, symbol: str) -> bool:
+        self._prune_failed_futures_routes()
+        blocked_until = self._failed_futures_routes.get(self._failed_route_key(exchange_id, symbol))
+        return blocked_until is not None and blocked_until > datetime.now()
+
+    def _is_blocked_opportunity(self, opp: ArbitrageOpportunity) -> bool:
+        if opp.strategy == 'futures_funding':
+            details = opp.details
+            assert isinstance(details, FuturesFundingDetails)
+            return (
+                self._is_failed_futures_route(details.long_exchange, opp.symbol)
+                or self._is_failed_futures_route(details.short_exchange, opp.symbol)
+            )
+        if opp.strategy != 'futures_spot':
+            return False
+        details = opp.details
+        assert isinstance(details, FuturesSpotDetails)
+        return self._is_failed_futures_route(details.futures_exchange, opp.symbol)
+
+    def _is_not_futures_market_error(self, message: str) -> bool:
+        lower_message = message.lower()
+        return 'not a futures market' in lower_message or 'is not a futures market' in lower_message
+
+    def _extract_failed_futures_exchange(self, message: str) -> Optional[str]:
+        marker = 'futures market setup failed for '
+        lower_message = message.lower()
+        marker_index = lower_message.find(marker)
+        if marker_index == -1:
+            return None
+        tail = message[marker_index + len(marker):]
+        return tail.split(' ', 1)[0].strip() or None
+
+    def _remember_failed_futures_route(self, opp: ArbitrageOpportunity, message: str) -> None:
+        exchange_id = self._extract_failed_futures_exchange(message)
+        if exchange_id:
+            self._block_failed_futures_route(exchange_id, opp.symbol)
+            return
+        if opp.strategy == 'futures_funding':
+            details = opp.details
+            assert isinstance(details, FuturesFundingDetails)
+            self._block_failed_futures_route(details.long_exchange, opp.symbol)
+            self._block_failed_futures_route(details.short_exchange, opp.symbol)
+            return
+        if opp.strategy == 'futures_spot':
+            details = opp.details
+            assert isinstance(details, FuturesSpotDetails)
+            self._block_failed_futures_route(details.futures_exchange, opp.symbol)
 
     async def _maybe_reconcile_live_state(
         self,
@@ -455,6 +551,7 @@ class ArbitrageBotService:
 
     async def _run_cycle(self) -> None:
         try:
+            self._prune_failed_futures_routes()
             await self._refresh_deployment_state()
             result = await self._scanner.execute(self._scan_config)
             self._stats.scan_count += 1
@@ -561,6 +658,9 @@ class ArbitrageBotService:
             for opp in result.opportunities:
                 if not opp.is_profitable(self._scan_config.min_profit_percent):
                     continue
+                if self._is_blocked_opportunity(opp):
+                    logger.info('skip_blocked_futures_route symbol=%s strategy=%s', opp.symbol, opp.strategy)
+                    continue
                 if not await self._allows_new_trades():
                     logger.info(
                         'deployment drain active, skip new trades open_positions=%s pending_opportunities=%s',
@@ -655,6 +755,8 @@ class ArbitrageBotService:
                                 asyncio.create_task(self._alert_service.send_trade_alert(alert))
                 except LiveExecutionError as e:
                     msg = f'Live execution error: {e}'
+                    if self._is_not_futures_market_error(str(e)):
+                        self._remember_failed_futures_route(opp, str(e))
                     self._stats.errors.append(msg)
                     self._stats.errors = self._stats.errors[-10:]
                     logger.exception(msg)
@@ -673,6 +775,8 @@ class ArbitrageBotService:
             self._stats.errors.append(msg)
             logger.exception(msg)
             self._metrics.record_error('live_execution')
+            if isinstance(e, SafetyViolationError):
+                self._activate_panic(str(e))
             if self._on_error:
                 self._on_error(msg)
         except Exception as e:

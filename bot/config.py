@@ -28,6 +28,8 @@ class AppConfig:
     min_profit_percent: float
     max_position_usdt: float
     max_open_positions: int
+    max_daily_loss_usdt: float
+    max_close_failures: int
     live_reconcile_interval_seconds: int
     live_orphan_notional_threshold_usdt: float
     spot_scan_concurrency: int
@@ -79,6 +81,8 @@ config = AppConfig(
     min_profit_percent=float(os.getenv('MIN_PROFIT_PERCENT', '0.1')),
     max_position_usdt=float(os.getenv('MAX_POSITION_USDT', '100')),
     max_open_positions=max(int(os.getenv('MAX_OPEN_POSITIONS', '1')), 1),
+    max_daily_loss_usdt=max(float(os.getenv('MAX_DAILY_LOSS_USDT', '20')), 0.0),
+    max_close_failures=max(int(os.getenv('MAX_CLOSE_FAILURES', '10')), 1),
     live_reconcile_interval_seconds=max(int(os.getenv('LIVE_RECONCILE_INTERVAL_SECONDS', '30')), 5),
     live_orphan_notional_threshold_usdt=float(os.getenv('LIVE_ORPHAN_NOTIONAL_THRESHOLD_USDT', '5')),
     spot_scan_concurrency=int(os.getenv('SPOT_SCAN_CONCURRENCY', '6')),
