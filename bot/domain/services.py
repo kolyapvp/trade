@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from collections import defaultdict, deque
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from statistics import mean, median
+from typing import Optional
 
 from .value_objects import OrderBook, Fee
 from .ports import Ticker, FuturesTicker
@@ -10,7 +14,111 @@ from .entities import (
     TriangularDetails,
     FuturesSpotDetails,
     FuturesFundingDetails,
+    VirtualTrade,
 )
+
+
+@dataclass(frozen=True)
+class FuturesSpotRiskConfig:
+    book_depth_limit: int = 20
+    min_top_level_notional_usdt: float = 150.0
+    min_depth_ratio: float = 1.0
+    max_spread_percent: float = 0.12
+    close_reserve_scale: float = 1.0
+    basis_history_window: int = 240
+    basis_min_samples: int = 30
+    min_basis_zscore: float = 1.2
+    route_history_size: int = 50
+    route_min_closed_trades: int = 5
+    route_min_win_rate: float = 0.4
+    route_max_median_underperformance_usdt: float = 0.15
+    route_max_p95_underperformance_usdt: float = 0.35
+
+
+@dataclass(frozen=True)
+class FuturesSpotBasisSnapshot:
+    samples: int = 0
+    mean: float = 0.0
+    stddev: float = 0.0
+    zscore: float = 0.0
+
+
+@dataclass(frozen=True)
+class FuturesSpotRouteQuality:
+    trades_count: int = 0
+    win_rate: float = 1.0
+    median_underperformance_usdt: float = 0.0
+    p95_underperformance_usdt: float = 0.0
+
+    @property
+    def has_history(self) -> bool:
+        return self.trades_count > 0
+
+
+class FuturesSpotBasisMonitor:
+    def __init__(self, window_size: int):
+        self._window_size = max(window_size, 1)
+        self._history: dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=self._window_size))
+
+    def observe(self, route_key: str, basis_percent: float) -> FuturesSpotBasisSnapshot:
+        history = self._history[route_key]
+        snapshot = self._snapshot(list(history), basis_percent)
+        history.append(basis_percent)
+        return snapshot
+
+    def _snapshot(self, values: list[float], current: float) -> FuturesSpotBasisSnapshot:
+        if len(values) < 2:
+            return FuturesSpotBasisSnapshot(samples=len(values))
+        avg = mean(values)
+        variance = mean([(value - avg) ** 2 for value in values])
+        stddev = variance ** 0.5
+        if stddev <= 1e-12:
+            return FuturesSpotBasisSnapshot(samples=len(values), mean=avg, stddev=stddev, zscore=0.0)
+        zscore = (current - avg) / stddev
+        return FuturesSpotBasisSnapshot(samples=len(values), mean=avg, stddev=stddev, zscore=zscore)
+
+
+class FuturesSpotRouteQualityMonitor:
+    def __init__(self, history_size: int):
+        self._history_size = max(history_size, 1)
+        self._underperformance: dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=self._history_size))
+        self._wins: dict[str, deque[int]] = defaultdict(lambda: deque(maxlen=self._history_size))
+
+    @staticmethod
+    def route_key(spot_exchange: str, futures_exchange: str, symbol: str) -> str:
+        return f'{spot_exchange}->{futures_exchange}:{symbol}'
+
+    def record_trade(self, trade: VirtualTrade) -> None:
+        if trade.strategy != 'futures_spot':
+            return
+        details = trade.details
+        assert isinstance(details, FuturesSpotDetails)
+        actual_profit = trade.actual_profit_usdt
+        if actual_profit is None:
+            return
+        route_key = self.route_key(details.spot_exchange, details.futures_exchange, trade.symbol)
+        underperformance = max(trade.expected_profit_usdt - actual_profit, 0.0)
+        self._underperformance[route_key].append(underperformance)
+        self._wins[route_key].append(1 if actual_profit > 0 else 0)
+
+    def bootstrap(self, trades: list[VirtualTrade]) -> None:
+        for trade in trades:
+            self.record_trade(trade)
+
+    def get_quality(self, spot_exchange: str, futures_exchange: str, symbol: str) -> FuturesSpotRouteQuality:
+        route_key = self.route_key(spot_exchange, futures_exchange, symbol)
+        underperformance = list(self._underperformance.get(route_key, ()))
+        wins = list(self._wins.get(route_key, ()))
+        if not underperformance or not wins:
+            return FuturesSpotRouteQuality(trades_count=max(len(underperformance), len(wins)))
+        sorted_underperformance = sorted(underperformance)
+        p95_index = min(max(int(len(sorted_underperformance) * 0.95) - 1, 0), len(sorted_underperformance) - 1)
+        return FuturesSpotRouteQuality(
+            trades_count=len(sorted_underperformance),
+            win_rate=sum(wins) / len(wins),
+            median_underperformance_usdt=median(sorted_underperformance),
+            p95_underperformance_usdt=sorted_underperformance[p95_index],
+        )
 
 
 class ProfitCalculator:
@@ -76,25 +184,78 @@ class ProfitCalculator:
 
     def calculate_futures_spot(
         self,
-        spot_price: float,
-        futures_price: float,
+        spot_book: OrderBook,
+        futures_book: OrderBook,
         position_usdt: float,
         spot_fee: Fee,
         futures_fee: Fee,
+        close_reserve_scale: float = 1.0,
     ) -> dict:
-        if spot_price <= 0 or futures_price <= 0:
+        if position_usdt <= 0:
             return self._empty()
-        basis = futures_price - spot_price
-        basis_percent = (basis / spot_price * 100) if spot_price > 0 else 0.0
+        target_qty = position_usdt / spot_book.best_ask if spot_book.best_ask > 0 else 0.0
+        if target_qty <= 0:
+            return self._empty()
 
-        qty = position_usdt / spot_price if spot_price > 0 else 0.0
-        spot_fee_usdt = spot_fee.calculate(position_usdt)
-        futures_fee_usdt = futures_fee.calculate(position_usdt)
+        spot_entry_budget = spot_book.fill_buy_order(position_usdt)
+        if spot_entry_budget['filled_qty'] <= 0:
+            return self._empty()
 
-        basis_profit = qty * basis
-        total_fees = (spot_fee_usdt + futures_fee_usdt) * 2
+        futures_entry_budget = futures_book.fill_sell_order(target_qty)
+        if futures_entry_budget['filled_qty'] <= 0:
+            return self._empty()
 
-        profit_usdt = basis_profit - total_fees
+        executable_qty = min(
+            target_qty,
+            spot_entry_budget['filled_qty'],
+            futures_entry_budget['filled_qty'],
+        )
+        if executable_qty <= 0:
+            return self._empty()
+
+        spot_entry = spot_book.fill_buy_quantity(executable_qty)
+        futures_entry = futures_book.fill_sell_order(executable_qty)
+        if spot_entry['filled_qty'] <= 0 or futures_entry['filled_qty'] <= 0:
+            return self._empty()
+
+        spot_entry_price = spot_entry['avg_price']
+        futures_entry_price = futures_entry['avg_price']
+        if spot_entry_price <= 0 or futures_entry_price <= 0:
+            return self._empty()
+
+        basis = futures_entry_price - spot_entry_price
+        basis_percent = (basis / spot_entry_price * 100) if spot_entry_price > 0 else 0.0
+
+        entry_edge_usdt = futures_entry['total_revenue'] - spot_entry['total_cost']
+
+        expected_spot_exit = executable_qty * spot_book.best_bid
+        spot_exit = spot_book.fill_sell_order(executable_qty)
+        expected_futures_exit = executable_qty * futures_book.best_ask
+        futures_exit = futures_book.fill_buy_quantity(executable_qty)
+
+        spot_exit_depth_impact = max(expected_spot_exit - spot_exit['total_revenue'], 0.0)
+        futures_exit_depth_impact = max(futures_exit['total_cost'] - expected_futures_exit, 0.0)
+        close_reserve_usdt = (
+            (spot_book.spread + futures_book.spread) * executable_qty
+            + spot_exit_depth_impact
+            + futures_exit_depth_impact
+        ) * max(close_reserve_scale, 0.0)
+
+        entry_fees = (
+            spot_fee.calculate(spot_entry['total_cost'])
+            + futures_fee.calculate(futures_entry['total_revenue'])
+        )
+        exit_fees = (
+            spot_fee.calculate(expected_spot_exit)
+            + futures_fee.calculate(expected_futures_exit)
+        )
+        total_fees = entry_fees + exit_fees
+
+        liquidity_ratio = min(
+            spot_entry_budget['total_cost'] / position_usdt if position_usdt > 0 else 0.0,
+            futures_entry_budget['filled_qty'] / target_qty if target_qty > 0 else 0.0,
+        )
+        profit_usdt = entry_edge_usdt - total_fees - close_reserve_usdt
         profit_percent = (profit_usdt / position_usdt * 100) if position_usdt > 0 else 0.0
 
         return {
@@ -103,8 +264,16 @@ class ProfitCalculator:
             'profit_percent': profit_percent,
             'basis': basis,
             'basis_percent': basis_percent,
-            'basis_profit_usdt': basis_profit,
+            'basis_profit_usdt': entry_edge_usdt,
             'total_fees_usdt': total_fees,
+            'entry_quantity': executable_qty,
+            'spot_price': spot_entry_price,
+            'futures_price': futures_entry_price,
+            'spot_spread_percent': spot_book.spread_percent,
+            'futures_spread_percent': futures_book.spread_percent,
+            'entry_edge_usdt': entry_edge_usdt,
+            'close_reserve_usdt': close_reserve_usdt,
+            'liquidity_ratio': liquidity_ratio,
         }
 
     def calculate_futures_funding(
@@ -150,6 +319,14 @@ class ProfitCalculator:
             'basis_percent': 0.0,
             'basis_profit_usdt': 0.0,
             'total_fees_usdt': 0.0,
+            'entry_quantity': 0.0,
+            'spot_price': 0.0,
+            'futures_price': 0.0,
+            'spot_spread_percent': 0.0,
+            'futures_spread_percent': 0.0,
+            'entry_edge_usdt': 0.0,
+            'close_reserve_usdt': 0.0,
+            'liquidity_ratio': 0.0,
             'buy_price': 0.0,
             'sell_price': 0.0,
             'effective_qty': 0.0,
@@ -159,8 +336,22 @@ class ProfitCalculator:
 
 
 class ArbitrageDetector:
-    def __init__(self):
+    def __init__(
+        self,
+        futures_spot_risk: Optional[FuturesSpotRiskConfig] = None,
+        futures_spot_basis_monitor: Optional[FuturesSpotBasisMonitor] = None,
+        futures_spot_route_quality_monitor: Optional[FuturesSpotRouteQualityMonitor] = None,
+    ):
         self._calc = ProfitCalculator()
+        self._futures_spot_risk = futures_spot_risk or FuturesSpotRiskConfig()
+        self._futures_spot_basis_monitor = (
+            futures_spot_basis_monitor
+            or FuturesSpotBasisMonitor(self._futures_spot_risk.basis_history_window)
+        )
+        self._futures_spot_route_quality_monitor = (
+            futures_spot_route_quality_monitor
+            or FuturesSpotRouteQualityMonitor(self._futures_spot_risk.route_history_size)
+        )
 
     def detect_cross_exchange(
         self,
@@ -269,24 +460,50 @@ class ArbitrageDetector:
         symbol: str,
         spot_ticker: Ticker,
         futures_ticker: FuturesTicker,
+        spot_book: OrderBook,
+        futures_book: OrderBook,
         spot_fee: 'Fee',
         futures_fee: 'Fee',
         position_usdt: float,
         min_profit_percent: float,
         long_only: bool = True,
     ) -> ArbitrageOpportunity | None:
-        spot_entry = spot_ticker.ask or spot_ticker.last or spot_ticker.bid
-        futures_entry = futures_ticker.bid or futures_ticker.last or futures_ticker.ask
+        if not self._passes_futures_spot_liquidity_filters(spot_book, futures_book):
+            return None
+
         result = self._calc.calculate_futures_spot(
-            spot_entry,
-            futures_entry,
+            spot_book,
+            futures_book,
             position_usdt,
             spot_fee,
             futures_fee,
+            close_reserve_scale=self._futures_spot_risk.close_reserve_scale,
         )
 
         basis = result['basis']
         if long_only and basis < 0:
+            return None
+
+        if result['liquidity_ratio'] < self._futures_spot_risk.min_depth_ratio:
+            return None
+
+        basis_snapshot = self._futures_spot_basis_monitor.observe(
+            self._futures_spot_route_quality_monitor.route_key(spot_exchange_id, futures_exchange_id, symbol),
+            result['basis_percent'],
+        )
+        zscore_value = basis_snapshot.zscore if long_only else abs(basis_snapshot.zscore)
+        if (
+            basis_snapshot.samples >= self._futures_spot_risk.basis_min_samples
+            and zscore_value < self._futures_spot_risk.min_basis_zscore
+        ):
+            return None
+
+        route_quality = self._futures_spot_route_quality_monitor.get_quality(
+            spot_exchange_id,
+            futures_exchange_id,
+            symbol,
+        )
+        if self._is_low_quality_route(route_quality):
             return None
 
         if not result.get('is_profitable'):
@@ -305,15 +522,63 @@ class ArbitrageDetector:
                 spot_exchange=spot_exchange_id,
                 futures_exchange=futures_exchange_id,
                 symbol=symbol,
-                spot_price=spot_entry,
-                futures_price=futures_entry,
+                spot_price=result['spot_price'],
+                futures_price=result['futures_price'],
                 funding_rate=futures_ticker.funding_rate,
                 basis=result['basis'],
                 basis_percent=result['basis_percent'],
                 spot_taker_fee=spot_fee.taker,
                 futures_taker_fee=futures_fee.taker,
+                entry_quantity=result['entry_quantity'],
+                spot_spread_percent=result['spot_spread_percent'],
+                futures_spread_percent=result['futures_spread_percent'],
+                entry_edge_usdt=result['entry_edge_usdt'],
+                close_reserve_usdt=result['close_reserve_usdt'],
+                basis_zscore=basis_snapshot.zscore,
+                liquidity_ratio=result['liquidity_ratio'],
+                route_win_rate=route_quality.win_rate,
+                route_median_underperformance_usdt=route_quality.median_underperformance_usdt,
             ),
         )
+
+    def record_futures_spot_trade(self, trade: VirtualTrade) -> None:
+        self._futures_spot_route_quality_monitor.record_trade(trade)
+
+    def bootstrap_futures_spot_trades(self, trades: list[VirtualTrade]) -> None:
+        self._futures_spot_route_quality_monitor.bootstrap(trades)
+
+    def _passes_futures_spot_liquidity_filters(self, spot_book: OrderBook, futures_book: OrderBook) -> bool:
+        if spot_book.best_ask <= 0 or spot_book.best_bid <= 0:
+            return False
+        if futures_book.best_ask <= 0 or futures_book.best_bid <= 0:
+            return False
+        if spot_book.best_ask_notional < self._futures_spot_risk.min_top_level_notional_usdt:
+            return False
+        if spot_book.best_bid_notional < self._futures_spot_risk.min_top_level_notional_usdt:
+            return False
+        if futures_book.best_bid_notional < self._futures_spot_risk.min_top_level_notional_usdt:
+            return False
+        if futures_book.best_ask_notional < self._futures_spot_risk.min_top_level_notional_usdt:
+            return False
+        if spot_book.spread_percent > self._futures_spot_risk.max_spread_percent:
+            return False
+        if futures_book.spread_percent > self._futures_spot_risk.max_spread_percent:
+            return False
+        return True
+
+    def _is_low_quality_route(self, route_quality: FuturesSpotRouteQuality) -> bool:
+        if route_quality.trades_count < self._futures_spot_risk.route_min_closed_trades:
+            return False
+        if route_quality.win_rate < self._futures_spot_risk.route_min_win_rate:
+            return True
+        if (
+            route_quality.median_underperformance_usdt
+            > self._futures_spot_risk.route_max_median_underperformance_usdt
+        ):
+            return True
+        if route_quality.p95_underperformance_usdt > self._futures_spot_risk.route_max_p95_underperformance_usdt:
+            return True
+        return False
 
     def detect_futures_funding(
         self,

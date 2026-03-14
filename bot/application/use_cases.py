@@ -23,7 +23,12 @@ from ..domain.ports import (
     Ticker,
     FuturesTicker,
 )
-from ..domain.services import ArbitrageDetector
+from ..domain.services import (
+    ArbitrageDetector,
+    FuturesSpotBasisMonitor,
+    FuturesSpotRiskConfig,
+    FuturesSpotRouteQualityMonitor,
+)
 from ..domain.value_objects import Fee, OrderBook
 
 
@@ -50,6 +55,7 @@ class ScanConfig:
     enable_futures_spot: bool = True
     enable_futures_funding: bool = True
     futures_spot_long_only: bool = True
+    futures_spot_book_depth_limit: int = 20
 
 
 @dataclass
@@ -65,11 +71,28 @@ class ScanResult:
 
 
 class ScanOpportunitiesUseCase:
-    def __init__(self, spot_exchanges: list[IExchange], futures_exchanges: list[IExchange]):
+    def __init__(
+        self,
+        spot_exchanges: list[IExchange],
+        futures_exchanges: list[IExchange],
+        futures_spot_risk: Optional[FuturesSpotRiskConfig] = None,
+        futures_spot_basis_monitor: Optional[FuturesSpotBasisMonitor] = None,
+        futures_spot_route_quality_monitor: Optional[FuturesSpotRouteQualityMonitor] = None,
+    ):
         self._spot = spot_exchanges
         self._futures = futures_exchanges
-        self._detector = ArbitrageDetector()
+        self._detector = ArbitrageDetector(
+            futures_spot_risk=futures_spot_risk,
+            futures_spot_basis_monitor=futures_spot_basis_monitor,
+            futures_spot_route_quality_monitor=futures_spot_route_quality_monitor,
+        )
         self._fee_cache: dict[tuple[str, str], Fee] = {}
+
+    def bootstrap_futures_spot_trades(self, trades: list[VirtualTrade]) -> None:
+        self._detector.bootstrap_futures_spot_trades(trades)
+
+    def record_futures_spot_trade(self, trade: VirtualTrade) -> None:
+        self._detector.record_futures_spot_trade(trade)
 
     async def execute(self, cfg: ScanConfig) -> ScanResult:
         start = datetime.now()
@@ -77,7 +100,8 @@ class ScanOpportunitiesUseCase:
         observed_opportunities: list[ArbitrageOpportunity] = []
         errors: list[str] = []
         exchange_data: list[dict] = []
-        need_order_books = cfg.enable_cross_exchange
+        need_spot_books = cfg.enable_cross_exchange or cfg.enable_futures_spot
+        need_futures_books = cfg.enable_futures_spot
         spot_limit = max(cfg.spot_scan_concurrency, 1)
         futures_limit = max(cfg.futures_scan_concurrency, 1)
 
@@ -103,13 +127,13 @@ class ScanOpportunitiesUseCase:
 
                 await asyncio.gather(*[load_ticker(symbol) for symbol in missing_tickers], return_exceptions=True)
 
-            if need_order_books:
+            if need_spot_books:
                 book_semaphore = asyncio.Semaphore(spot_limit)
 
                 async def load_book(symbol: str) -> None:
                     async with book_semaphore:
                         try:
-                            books[symbol] = await exchange.fetch_order_book(symbol, 20)
+                            books[symbol] = await exchange.fetch_order_book(symbol, cfg.futures_spot_book_depth_limit)
                         except Exception as e:
                             errors.append(f'{exchange.info.id} book {symbol}: {e}')
 
@@ -161,12 +185,14 @@ class ScanOpportunitiesUseCase:
         futures_prices: dict[str, dict[str, float]] = {}
         futures_funding: dict[str, dict[str, float]] = {}
         futures_tickers_cache: dict[str, dict[str, FuturesTicker]] = {}
+        futures_books_cache: dict[str, dict[str, OrderBook]] = {}
         spot_fee_cache: dict[tuple[str, str], Fee] = {}
         futures_fee_cache: dict[tuple[str, str], Fee] = {}
 
         if (cfg.enable_futures_spot or cfg.enable_futures_funding) and self._futures:
             async def load_futures_exchange(futures_ex: IExchange) -> None:
                 cache: dict[str, FuturesTicker] = {}
+                books: dict[str, OrderBook] = {}
                 try:
                     fetched_tickers = await futures_ex.fetch_futures_tickers(cfg.symbols)
                     cache.update({ticker.symbol: ticker for ticker in fetched_tickers})
@@ -187,10 +213,29 @@ class ScanOpportunitiesUseCase:
                                 errors.append(f'futures {futures_ex.info.id} {symbol}: {e}')
 
                     await asyncio.gather(*[load_symbol(symbol) for symbol in missing_symbols], return_exceptions=True)
+                if need_futures_books:
+                    futures_book_semaphore = asyncio.Semaphore(futures_limit)
+
+                    async def load_futures_book(symbol: str) -> None:
+                        async with futures_book_semaphore:
+                            try:
+                                books[symbol] = await futures_ex.fetch_order_book(
+                                    symbol,
+                                    cfg.futures_spot_book_depth_limit,
+                                )
+                            except Exception as e:
+                                errors.append(f'futures-book {futures_ex.info.id} {symbol}: {e}')
+
+                    await asyncio.gather(
+                        *[load_futures_book(symbol) for symbol in cfg.symbols],
+                        return_exceptions=True,
+                    )
                 if cache:
                     futures_tickers_cache[futures_ex.info.id] = cache
                     futures_prices[futures_ex.info.id] = {s: ft.last for s, ft in cache.items()}
                     futures_funding[futures_ex.info.id] = {s: ft.funding_rate for s, ft in cache.items()}
+                if books:
+                    futures_books_cache[futures_ex.info.id] = books
 
             await asyncio.gather(*[load_futures_exchange(ex) for ex in self._futures], return_exceptions=True)
             futures_loaded_at = datetime.now()
@@ -257,7 +302,9 @@ class ScanOpportunitiesUseCase:
                     for symbol in cfg.symbols:
                         spot_ticker = spot_data['tickers'].get(symbol)
                         futures_ticker = ftickers.get(symbol)
-                        if not spot_ticker or not futures_ticker:
+                        spot_book = spot_data['books'].get(symbol)
+                        futures_book = futures_books_cache.get(futures_ex.info.id, {}).get(symbol)
+                        if not spot_ticker or not futures_ticker or not spot_book or not futures_book:
                             continue
                         try:
                             spot_fee = spot_fee_cache.get((spot_ex.info.id, symbol), spot_ex.info.fee)
@@ -268,6 +315,8 @@ class ScanOpportunitiesUseCase:
                                 symbol,
                                 spot_ticker,
                                 futures_ticker,
+                                spot_book,
+                                futures_book,
                                 spot_fee,
                                 futures_fee,
                                 cfg.position_size_usdt,
@@ -454,6 +503,8 @@ class FuturesSpotPositionManager:
                 long_taker_fee=d.long_taker_fee,
                 short_taker_fee=d.short_taker_fee,
                 target_close_at=target_close_at,
+                expected_profit_usdt=opp.profit_usdt,
+                expected_profit_percent=opp.profit_percent,
             )
         else:
             d = opp.details
@@ -469,6 +520,8 @@ class FuturesSpotPositionManager:
                 position_usdt=opp.position_size_usdt,
                 spot_taker_fee=d.spot_taker_fee,
                 futures_taker_fee=d.futures_taker_fee,
+                expected_profit_usdt=opp.profit_usdt,
+                expected_profit_percent=opp.profit_percent,
             )
         self._positions[opp.symbol] = pos
         self._reset_close_failures(opp.symbol)
@@ -572,6 +625,8 @@ class FuturesSpotPositionManager:
             entry_spot_fee_usdt=spot_order.fee_cost_quote,
             entry_futures_cost_usdt=futures_order.cost or opp.position_size_usdt,
             entry_futures_fee_usdt=futures_order.fee_cost_quote,
+            expected_profit_usdt=opp.profit_usdt,
+            expected_profit_percent=opp.profit_percent,
         )
         self._positions[opp.symbol] = pos
         self._reset_close_failures(opp.symbol)
@@ -661,6 +716,8 @@ class FuturesSpotPositionManager:
             entry_long_fee_usdt=long_order.fee_cost_quote,
             entry_short_cost_usdt=short_order.cost or opp.position_size_usdt,
             entry_short_fee_usdt=short_order.fee_cost_quote,
+            expected_profit_usdt=opp.profit_usdt,
+            expected_profit_percent=opp.profit_percent,
         )
         self._positions[opp.symbol] = pos
         self._reset_close_failures(opp.symbol)
@@ -1165,23 +1222,13 @@ class FuturesSpotPositionManager:
         return None
 
     def _build_futures_spot_trade(self, pos: FuturesSpotPosition, reason: str) -> VirtualTrade:
-        qty = min(pos.spot_base_quantity, pos.futures_base_quantity)
-        entry_basis_profit = qty * (pos.entry_futures_price - pos.entry_spot_price)
-        entry_fees = (
-            pos.entry_spot_fee_usdt
-            + pos.entry_futures_fee_usdt
-            + pos.spot_taker_fee * pos.position_usdt
-            + pos.futures_taker_fee * pos.position_usdt
-        )
-        expected_profit = entry_basis_profit - entry_fees
-        expected_pct = (expected_profit / pos.position_usdt * 100) if pos.position_usdt > 0 else 0.0
         trade = VirtualTrade(
             strategy='futures_spot',
             symbol=pos.symbol,
             mode=self._trading_mode,
             position_size_usdt=pos.position_usdt,
-            expected_profit_usdt=expected_profit,
-            expected_profit_percent=expected_pct,
+            expected_profit_usdt=pos.expected_profit_usdt,
+            expected_profit_percent=pos.expected_profit_percent,
             details=FuturesSpotDetails(
                 spot_exchange=pos.spot_exchange,
                 futures_exchange=pos.futures_exchange,
@@ -1199,21 +1246,14 @@ class FuturesSpotPositionManager:
         return trade
 
     def _build_futures_funding_trade(self, pos: FuturesFundingPosition, reason: str) -> VirtualTrade:
-        expected_profit = pos.position_usdt * pos.funding_rate_delta - (
-            pos.entry_long_fee_usdt
-            + pos.entry_short_fee_usdt
-            + pos.long_taker_fee * pos.position_usdt
-            + pos.short_taker_fee * pos.position_usdt
-        )
-        expected_pct = (expected_profit / pos.position_usdt * 100) if pos.position_usdt > 0 else 0.0
         target_funding_time = int(pos.target_close_at.timestamp() * 1000) if pos.target_close_at else 0
         trade = VirtualTrade(
             strategy='futures_funding',
             symbol=pos.symbol,
             mode=self._trading_mode,
             position_size_usdt=pos.position_usdt,
-            expected_profit_usdt=expected_profit,
-            expected_profit_percent=expected_pct,
+            expected_profit_usdt=pos.expected_profit_usdt,
+            expected_profit_percent=pos.expected_profit_percent,
             details=FuturesFundingDetails(
                 long_exchange=pos.long_exchange,
                 short_exchange=pos.short_exchange,

@@ -303,7 +303,10 @@ class ArbitrageBotService:
         assert isinstance(d, FuturesSpotDetails)
         return (
             f'Спот: ${d.spot_price:.4f} | Фьюч: ${d.futures_price:.4f} | '
-            f'Базис: {d.basis_percent:.4f}% | Ставка: {d.funding_rate * 100:.4f}%'
+            f'Базис: {d.basis_percent:.4f}% | '
+            f'Z: {d.basis_zscore:.2f} | '
+            f'Резерв: ${d.close_reserve_usdt:.4f} | '
+            f'Ликвидн.: {d.liquidity_ratio:.2f}x'
         )
 
     def _build_workflow(self, opp: ArbitrageOpportunity) -> list[str]:
@@ -365,8 +368,9 @@ class ArbitrageBotService:
                 f'📌 <b>Кэш-энд-кэрри</b> (фьюч дороже спота){cross_label}',
                 f'1️⃣ Купить спот <b>{coin}</b> на <b>{d.spot_exchange}</b> по ${d.spot_price:.4f}',
                 f'2️⃣ Открыть фьюч <b>{coin} SHORT</b> на <b>{d.futures_exchange}</b> по ${d.futures_price:.4f}',
-                f'3️⃣ Ставка фин-я: {rate_sign}{rate_pct:.4f}%/8ч → <b>{who_receives}</b>',
-                f'4️⃣ Позиция будет закрыта ботом автоматически при схождении базиса',
+                f'3️⃣ Исполнимый edge: <b>${d.entry_edge_usdt:.4f}</b> | резерв выхода: <b>${d.close_reserve_usdt:.4f}</b>',
+                f'4️⃣ Z-score базиса: <b>{d.basis_zscore:.2f}</b> | ликвидность: <b>{d.liquidity_ratio:.2f}x</b>',
+                f'5️⃣ Позиция будет закрыта ботом автоматически при схождении базиса',
             ]
 
     async def _refresh_deployment_state(self) -> DeploymentState:
@@ -606,6 +610,7 @@ class ArbitrageBotService:
                 )
             for pos, trade in closed_positions:
                 self._stats.total_trades_executed += 1
+                self._scanner.record_futures_spot_trade(trade)
                 self._metrics.record_trade(self._build_trade_telemetry(
                     strategy=trade.strategy,
                     symbol=trade.symbol,

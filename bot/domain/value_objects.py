@@ -81,6 +81,30 @@ class OrderBook:
     def best_ask(self) -> float:
         return self.asks[0].price if self.asks else 0.0
 
+    @property
+    def best_ask_notional(self) -> float:
+        if not self.asks:
+            return 0.0
+        return self.asks[0].price * self.asks[0].quantity
+
+    @property
+    def best_bid_notional(self) -> float:
+        if not self.bids:
+            return 0.0
+        return self.bids[0].price * self.bids[0].quantity
+
+    @property
+    def spread(self) -> float:
+        if not self.asks or not self.bids:
+            return 0.0
+        return max(self.best_ask - self.best_bid, 0.0)
+
+    @property
+    def spread_percent(self) -> float:
+        if self.best_ask <= 0:
+            return 0.0
+        return self.spread / self.best_ask * 100
+
     def fill_buy_order(self, usdt_amount: float) -> dict:
         remaining = usdt_amount
         filled_qty = 0.0
@@ -98,6 +122,20 @@ class OrderBook:
                 filled_qty += qty
                 total_cost += remaining
                 remaining = 0.0
+        avg_price = total_cost / filled_qty if filled_qty > 0 else 0.0
+        return {'filled_qty': filled_qty, 'avg_price': avg_price, 'total_cost': total_cost}
+
+    def fill_buy_quantity(self, qty: float) -> dict:
+        remaining = qty
+        filled_qty = 0.0
+        total_cost = 0.0
+        for level in self.asks:
+            if remaining <= 0:
+                break
+            level_qty = min(level.quantity, remaining)
+            filled_qty += level_qty
+            total_cost += level.price * level_qty
+            remaining -= level_qty
         avg_price = total_cost / filled_qty if filled_qty > 0 else 0.0
         return {'filled_qty': filled_qty, 'avg_price': avg_price, 'total_cost': total_cost}
 

@@ -30,6 +30,19 @@ class AppConfig:
     max_open_positions: int
     max_daily_loss_usdt: float
     max_close_failures: int
+    futures_spot_book_depth_limit: int
+    futures_spot_min_top_level_notional_usdt: float
+    futures_spot_min_depth_ratio: float
+    futures_spot_max_spread_percent: float
+    futures_spot_close_reserve_scale: float
+    futures_spot_basis_history_window: int
+    futures_spot_basis_min_samples: int
+    futures_spot_min_basis_zscore: float
+    futures_spot_route_history_size: int
+    futures_spot_route_min_closed_trades: int
+    futures_spot_route_min_win_rate: float
+    futures_spot_route_max_median_underperformance_usdt: float
+    futures_spot_route_max_p95_underperformance_usdt: float
     live_reconcile_interval_seconds: int
     live_orphan_notional_threshold_usdt: float
     spot_scan_concurrency: int
@@ -83,6 +96,28 @@ config = AppConfig(
     max_open_positions=max(int(os.getenv('MAX_OPEN_POSITIONS', '1')), 1),
     max_daily_loss_usdt=max(float(os.getenv('MAX_DAILY_LOSS_USDT', '20')), 0.0),
     max_close_failures=max(int(os.getenv('MAX_CLOSE_FAILURES', '10')), 1),
+    futures_spot_book_depth_limit=max(int(os.getenv('FUTURES_SPOT_BOOK_DEPTH_LIMIT', '20')), 5),
+    futures_spot_min_top_level_notional_usdt=max(
+        float(os.getenv('FUTURES_SPOT_MIN_TOP_LEVEL_NOTIONAL_USDT', '150')),
+        0.0,
+    ),
+    futures_spot_min_depth_ratio=max(float(os.getenv('FUTURES_SPOT_MIN_DEPTH_RATIO', '1.0')), 0.0),
+    futures_spot_max_spread_percent=max(float(os.getenv('FUTURES_SPOT_MAX_SPREAD_PERCENT', '0.12')), 0.0),
+    futures_spot_close_reserve_scale=max(float(os.getenv('FUTURES_SPOT_CLOSE_RESERVE_SCALE', '1.0')), 0.0),
+    futures_spot_basis_history_window=max(int(os.getenv('FUTURES_SPOT_BASIS_HISTORY_WINDOW', '240')), 10),
+    futures_spot_basis_min_samples=max(int(os.getenv('FUTURES_SPOT_BASIS_MIN_SAMPLES', '30')), 2),
+    futures_spot_min_basis_zscore=float(os.getenv('FUTURES_SPOT_MIN_BASIS_ZSCORE', '1.2')),
+    futures_spot_route_history_size=max(int(os.getenv('FUTURES_SPOT_ROUTE_HISTORY_SIZE', '50')), 5),
+    futures_spot_route_min_closed_trades=max(int(os.getenv('FUTURES_SPOT_ROUTE_MIN_CLOSED_TRADES', '5')), 1),
+    futures_spot_route_min_win_rate=min(max(float(os.getenv('FUTURES_SPOT_ROUTE_MIN_WIN_RATE', '0.4')), 0.0), 1.0),
+    futures_spot_route_max_median_underperformance_usdt=max(
+        float(os.getenv('FUTURES_SPOT_ROUTE_MAX_MEDIAN_UNDERPERFORMANCE_USDT', '0.15')),
+        0.0,
+    ),
+    futures_spot_route_max_p95_underperformance_usdt=max(
+        float(os.getenv('FUTURES_SPOT_ROUTE_MAX_P95_UNDERPERFORMANCE_USDT', '0.35')),
+        0.0,
+    ),
     live_reconcile_interval_seconds=max(int(os.getenv('LIVE_RECONCILE_INTERVAL_SECONDS', '30')), 5),
     live_orphan_notional_threshold_usdt=float(os.getenv('LIVE_ORPHAN_NOTIONAL_THRESHOLD_USDT', '5')),
     spot_scan_concurrency=int(os.getenv('SPOT_SCAN_CONCURRENCY', '6')),

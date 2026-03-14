@@ -20,6 +20,11 @@ from bot.application.use_cases import (
 )
 from bot.config import config
 from bot.domain.entities import Portfolio, VirtualTrade
+from bot.domain.services import (
+    FuturesSpotBasisMonitor,
+    FuturesSpotRiskConfig,
+    FuturesSpotRouteQualityMonitor,
+)
 from bot.infrastructure.exchange_factory import ExchangeFactory
 from bot.infrastructure.logging_setup import configure_file_logging
 from bot.infrastructure.metrics_service import NullMetricsService, PrometheusMetricsService
@@ -251,9 +256,37 @@ async def bootstrap() -> None:
             enable_futures_spot=config.strategies.get('futures_spot', True),
             enable_futures_funding=config.strategies.get('futures_funding', True),
             futures_spot_long_only=config.futures_spot_long_only,
+            futures_spot_book_depth_limit=config.futures_spot_book_depth_limit,
         )
 
-        scanner = ScanOpportunitiesUseCase(active_spot, active_futures)
+        futures_spot_risk = FuturesSpotRiskConfig(
+            book_depth_limit=config.futures_spot_book_depth_limit,
+            min_top_level_notional_usdt=config.futures_spot_min_top_level_notional_usdt,
+            min_depth_ratio=config.futures_spot_min_depth_ratio,
+            max_spread_percent=config.futures_spot_max_spread_percent,
+            close_reserve_scale=config.futures_spot_close_reserve_scale,
+            basis_history_window=config.futures_spot_basis_history_window,
+            basis_min_samples=config.futures_spot_basis_min_samples,
+            min_basis_zscore=config.futures_spot_min_basis_zscore,
+            route_history_size=config.futures_spot_route_history_size,
+            route_min_closed_trades=config.futures_spot_route_min_closed_trades,
+            route_min_win_rate=config.futures_spot_route_min_win_rate,
+            route_max_median_underperformance_usdt=config.futures_spot_route_max_median_underperformance_usdt,
+            route_max_p95_underperformance_usdt=config.futures_spot_route_max_p95_underperformance_usdt,
+        )
+        futures_spot_basis_monitor = FuturesSpotBasisMonitor(futures_spot_risk.basis_history_window)
+        futures_spot_route_quality_monitor = FuturesSpotRouteQualityMonitor(futures_spot_risk.route_history_size)
+        futures_spot_route_quality_monitor.bootstrap([
+            trade for trade in portfolio.closed_trades
+            if trade.strategy == 'futures_spot'
+        ])
+        scanner = ScanOpportunitiesUseCase(
+            active_spot,
+            active_futures,
+            futures_spot_risk=futures_spot_risk,
+            futures_spot_basis_monitor=futures_spot_basis_monitor,
+            futures_spot_route_quality_monitor=futures_spot_route_quality_monitor,
+        )
         executor = ExecuteDemoTradeUseCase(
             trade_repository,
             portfolio,

@@ -87,6 +87,8 @@ class RedisOpenPositionStore(IOpenPositionStore):
             'entry_spot_fee_usdt': snapshot.entry_spot_fee_usdt,
             'entry_futures_cost_usdt': snapshot.entry_futures_cost_usdt,
             'entry_futures_fee_usdt': snapshot.entry_futures_fee_usdt,
+            'expected_profit_usdt': snapshot.expected_profit_usdt,
+            'expected_profit_percent': snapshot.expected_profit_percent,
         }
 
     def _deserialize(self, data: dict) -> OpenPositionSnapshot:
@@ -114,4 +116,6 @@ class RedisOpenPositionStore(IOpenPositionStore):
             entry_spot_fee_usdt=float(data.get('entry_spot_fee_usdt', 0.0)),
             entry_futures_cost_usdt=float(data.get('entry_futures_cost_usdt', 0.0)),
             entry_futures_fee_usdt=float(data.get('entry_futures_fee_usdt', 0.0)),
+            expected_profit_usdt=float(data.get('expected_profit_usdt', 0.0)),
+            expected_profit_percent=float(data.get('expected_profit_percent', 0.0)),
         )

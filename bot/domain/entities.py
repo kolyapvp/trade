@@ -39,6 +39,15 @@ class FuturesSpotDetails:
     basis_percent: float
     spot_taker_fee: float = 0.0
     futures_taker_fee: float = 0.0
+    entry_quantity: float = 0.0
+    spot_spread_percent: float = 0.0
+    futures_spread_percent: float = 0.0
+    entry_edge_usdt: float = 0.0
+    close_reserve_usdt: float = 0.0
+    basis_zscore: float = 0.0
+    liquidity_ratio: float = 0.0
+    route_win_rate: float = 0.0
+    route_median_underperformance_usdt: float = 0.0
 
 
 @dataclass
@@ -86,6 +95,8 @@ class OpenPositionSnapshot:
     entry_spot_fee_usdt: float = 0.0
     entry_futures_cost_usdt: float = 0.0
     entry_futures_fee_usdt: float = 0.0
+    expected_profit_usdt: float = 0.0
+    expected_profit_percent: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -133,6 +144,8 @@ class FuturesSpotPosition:
         entry_spot_fee_usdt: float = 0.0,
         entry_futures_cost_usdt: float = 0.0,
         entry_futures_fee_usdt: float = 0.0,
+        expected_profit_usdt: float = 0.0,
+        expected_profit_percent: float = 0.0,
         position_id: Optional[str] = None,
         opened_at: Optional[datetime] = None,
     ):
@@ -157,6 +170,8 @@ class FuturesSpotPosition:
         self.entry_spot_fee_usdt = entry_spot_fee_usdt
         self.entry_futures_cost_usdt = entry_futures_cost_usdt or position_usdt
         self.entry_futures_fee_usdt = entry_futures_fee_usdt
+        self.expected_profit_usdt = expected_profit_usdt
+        self.expected_profit_percent = expected_profit_percent
         self.opened_at = opened_at or now
         self.status = 'open'
         self.exit_spot_price: float = 0.0
@@ -234,6 +249,8 @@ class FuturesSpotPosition:
             entry_spot_fee_usdt=self.entry_spot_fee_usdt,
             entry_futures_cost_usdt=self.entry_futures_cost_usdt,
             entry_futures_fee_usdt=self.entry_futures_fee_usdt,
+            expected_profit_usdt=self.expected_profit_usdt,
+            expected_profit_percent=self.expected_profit_percent,
             opened_at=self.opened_at,
         )
 
@@ -258,6 +275,8 @@ class FuturesSpotPosition:
             entry_spot_fee_usdt=snapshot.entry_spot_fee_usdt,
             entry_futures_cost_usdt=snapshot.entry_futures_cost_usdt,
             entry_futures_fee_usdt=snapshot.entry_futures_fee_usdt,
+            expected_profit_usdt=snapshot.expected_profit_usdt,
+            expected_profit_percent=snapshot.expected_profit_percent,
             position_id=snapshot.position_id,
             opened_at=snapshot.opened_at,
         )
@@ -287,6 +306,8 @@ class FuturesFundingPosition:
         entry_long_fee_usdt: float = 0.0,
         entry_short_cost_usdt: float = 0.0,
         entry_short_fee_usdt: float = 0.0,
+        expected_profit_usdt: float = 0.0,
+        expected_profit_percent: float = 0.0,
         position_id: Optional[str] = None,
         opened_at: Optional[datetime] = None,
     ):
@@ -312,6 +333,8 @@ class FuturesFundingPosition:
         self.entry_long_fee_usdt = entry_long_fee_usdt
         self.entry_short_cost_usdt = entry_short_cost_usdt or position_usdt
         self.entry_short_fee_usdt = entry_short_fee_usdt
+        self.expected_profit_usdt = expected_profit_usdt
+        self.expected_profit_percent = expected_profit_percent
         self.opened_at = opened_at or now
         self.status = 'open'
         self.exit_long_price: float = 0.0
@@ -398,6 +421,8 @@ class FuturesFundingPosition:
             entry_spot_fee_usdt=self.entry_long_fee_usdt,
             entry_futures_cost_usdt=self.entry_short_cost_usdt,
             entry_futures_fee_usdt=self.entry_short_fee_usdt,
+            expected_profit_usdt=self.expected_profit_usdt,
+            expected_profit_percent=self.expected_profit_percent,
             opened_at=self.opened_at,
         )
 
@@ -423,6 +448,8 @@ class FuturesFundingPosition:
             entry_long_fee_usdt=snapshot.entry_spot_fee_usdt,
             entry_short_cost_usdt=snapshot.entry_futures_cost_usdt,
             entry_short_fee_usdt=snapshot.entry_futures_fee_usdt,
+            expected_profit_usdt=snapshot.expected_profit_usdt,
+            expected_profit_percent=snapshot.expected_profit_percent,
             position_id=snapshot.position_id,
             opened_at=snapshot.opened_at,
         )
@@ -657,4 +684,13 @@ def _parse_strategy_details(strategy: str, details: dict) -> StrategyDetails:
         basis_percent=float(details.get('basis_percent', 0.0)),
         spot_taker_fee=float(details.get('spot_taker_fee', 0.0)),
         futures_taker_fee=float(details.get('futures_taker_fee', 0.0)),
+        entry_quantity=float(details.get('entry_quantity', 0.0)),
+        spot_spread_percent=float(details.get('spot_spread_percent', 0.0)),
+        futures_spread_percent=float(details.get('futures_spread_percent', 0.0)),
+        entry_edge_usdt=float(details.get('entry_edge_usdt', 0.0)),
+        close_reserve_usdt=float(details.get('close_reserve_usdt', 0.0)),
+        basis_zscore=float(details.get('basis_zscore', 0.0)),
+        liquidity_ratio=float(details.get('liquidity_ratio', 0.0)),
+        route_win_rate=float(details.get('route_win_rate', 0.0)),
+        route_median_underperformance_usdt=float(details.get('route_median_underperformance_usdt', 0.0)),
     )
