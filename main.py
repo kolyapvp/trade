@@ -249,6 +249,7 @@ async def bootstrap() -> None:
             position_size_usdt=config.max_position_usdt,
             min_profit_percent=config.min_profit_percent,
             triangular_paths=TRIANGULAR_PATHS,
+            scan_request_timeout_ms=config.scan_request_timeout_ms,
             spot_scan_concurrency=config.spot_scan_concurrency,
             futures_scan_concurrency=config.futures_scan_concurrency,
             enable_cross_exchange=config.strategies.get('cross_exchange', True),

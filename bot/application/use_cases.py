@@ -48,6 +48,7 @@ class ScanConfig:
     position_size_usdt: float
     min_profit_percent: float
     triangular_paths: list[TriangularPathConfig]
+    scan_request_timeout_ms: int = 8000
     spot_scan_concurrency: int = 6
     futures_scan_concurrency: int = 4
     enable_cross_exchange: bool = True
@@ -104,12 +105,41 @@ class ScanOpportunitiesUseCase:
         need_futures_books = cfg.enable_futures_spot
         spot_limit = max(cfg.spot_scan_concurrency, 1)
         futures_limit = max(cfg.futures_scan_concurrency, 1)
+        request_timeout_seconds = max(cfg.scan_request_timeout_ms / 1000, 0.1)
+
+        async def run_with_timeout(awaitable):
+            return await asyncio.wait_for(awaitable, timeout=request_timeout_seconds)
+
+        async def load_books(
+            exchange: IExchange,
+            symbols: list[str],
+            concurrency: int,
+            error_prefix: str,
+        ) -> dict[str, OrderBook]:
+            books: dict[str, OrderBook] = {}
+            if not symbols:
+                return books
+            semaphore = asyncio.Semaphore(concurrency)
+
+            async def load_symbol_book(symbol: str) -> None:
+                async with semaphore:
+                    try:
+                        books[symbol] = await run_with_timeout(
+                            exchange.fetch_order_book(symbol, cfg.futures_spot_book_depth_limit)
+                        )
+                    except Exception as e:
+                        errors.append(f'{error_prefix} {exchange.info.id} {symbol}: {e}')
+
+            await asyncio.gather(
+                *[load_symbol_book(symbol) for symbol in symbols],
+                return_exceptions=True,
+            )
+            return books
 
         async def load_exchange(exchange: IExchange) -> None:
-            books: dict[str, OrderBook] = {}
             tickers: dict[str, Ticker] = {}
             try:
-                fetched_tickers = await exchange.fetch_tickers(cfg.symbols)
+                fetched_tickers = await run_with_timeout(exchange.fetch_tickers(cfg.symbols))
                 tickers.update({ticker.symbol: ticker for ticker in fetched_tickers})
             except Exception as e:
                 errors.append(f'{exchange.info.id} tickers: {e}')
@@ -121,29 +151,17 @@ class ScanOpportunitiesUseCase:
                 async def load_ticker(symbol: str) -> None:
                     async with ticker_semaphore:
                         try:
-                            tickers[symbol] = await exchange.fetch_ticker(symbol)
+                            tickers[symbol] = await run_with_timeout(exchange.fetch_ticker(symbol))
                         except Exception as e:
                             errors.append(f'{exchange.info.id} ticker {symbol}: {e}')
 
                 await asyncio.gather(*[load_ticker(symbol) for symbol in missing_tickers], return_exceptions=True)
 
-            if need_spot_books:
-                book_semaphore = asyncio.Semaphore(spot_limit)
-
-                async def load_book(symbol: str) -> None:
-                    async with book_semaphore:
-                        try:
-                            books[symbol] = await exchange.fetch_order_book(symbol, cfg.futures_spot_book_depth_limit)
-                        except Exception as e:
-                            errors.append(f'{exchange.info.id} book {symbol}: {e}')
-
-                await asyncio.gather(*[load_book(symbol) for symbol in cfg.symbols], return_exceptions=True)
-
-            if books or tickers:
+            if tickers:
                 exchange_data.append({
                     'exchange_id': exchange.info.id,
                     'fee': exchange.info.fee,
-                    'books': books,
+                    'books': {},
                     'tickers': tickers,
                 })
 
@@ -155,6 +173,22 @@ class ScanOpportunitiesUseCase:
             for d in exchange_data
         }
         exchange_data_by_id = {data['exchange_id']: data for data in exchange_data}
+
+        if cfg.enable_cross_exchange and need_spot_books:
+            spot_book_results = await asyncio.gather(
+                *[
+                    load_books(spot_ex, cfg.symbols, spot_limit, 'spot-book')
+                    for spot_ex in self._spot
+                    if spot_ex.info.id in exchange_data_by_id
+                ],
+                return_exceptions=True,
+            )
+            for spot_ex, books in zip(
+                [spot_ex for spot_ex in self._spot if spot_ex.info.id in exchange_data_by_id],
+                spot_book_results,
+            ):
+                if isinstance(books, dict):
+                    exchange_data_by_id[spot_ex.info.id]['books'] = books
 
         if cfg.enable_cross_exchange and len(exchange_data) >= 2:
             for symbol in cfg.symbols:
@@ -192,9 +226,23 @@ class ScanOpportunitiesUseCase:
         if (cfg.enable_futures_spot or cfg.enable_futures_funding) and self._futures:
             async def load_futures_exchange(futures_ex: IExchange) -> None:
                 cache: dict[str, FuturesTicker] = {}
-                books: dict[str, OrderBook] = {}
                 try:
-                    fetched_tickers = await futures_ex.fetch_futures_tickers(cfg.symbols)
+                    if cfg.enable_futures_funding:
+                        fetched_tickers = await run_with_timeout(futures_ex.fetch_futures_tickers(cfg.symbols))
+                    else:
+                        spot_like_tickers = await run_with_timeout(futures_ex.fetch_tickers(cfg.symbols))
+                        fetched_tickers = [
+                            FuturesTicker(
+                                symbol=ticker.symbol,
+                                exchange_id=ticker.exchange_id,
+                                bid=ticker.bid,
+                                ask=ticker.ask,
+                                last=ticker.last,
+                                volume=ticker.volume,
+                                timestamp=ticker.timestamp,
+                            )
+                            for ticker in spot_like_tickers
+                        ]
                     cache.update({ticker.symbol: ticker for ticker in fetched_tickers})
                 except Exception as e:
                     errors.append(f'futures {futures_ex.info.id} tickers: {e}')
@@ -206,36 +254,17 @@ class ScanOpportunitiesUseCase:
                     async def load_symbol(symbol: str) -> None:
                         async with futures_semaphore:
                             try:
-                                ft = await futures_ex.fetch_futures_ticker(symbol)
+                                ft = await run_with_timeout(futures_ex.fetch_futures_ticker(symbol))
                                 if ft:
                                     cache[symbol] = ft
                             except Exception as e:
                                 errors.append(f'futures {futures_ex.info.id} {symbol}: {e}')
 
                     await asyncio.gather(*[load_symbol(symbol) for symbol in missing_symbols], return_exceptions=True)
-                if need_futures_books:
-                    futures_book_semaphore = asyncio.Semaphore(futures_limit)
-
-                    async def load_futures_book(symbol: str) -> None:
-                        async with futures_book_semaphore:
-                            try:
-                                books[symbol] = await futures_ex.fetch_order_book(
-                                    symbol,
-                                    cfg.futures_spot_book_depth_limit,
-                                )
-                            except Exception as e:
-                                errors.append(f'futures-book {futures_ex.info.id} {symbol}: {e}')
-
-                    await asyncio.gather(
-                        *[load_futures_book(symbol) for symbol in cfg.symbols],
-                        return_exceptions=True,
-                    )
                 if cache:
                     futures_tickers_cache[futures_ex.info.id] = cache
                     futures_prices[futures_ex.info.id] = {s: ft.last for s, ft in cache.items()}
                     futures_funding[futures_ex.info.id] = {s: ft.funding_rate for s, ft in cache.items()}
-                if books:
-                    futures_books_cache[futures_ex.info.id] = books
 
             await asyncio.gather(*[load_futures_exchange(ex) for ex in self._futures], return_exceptions=True)
             futures_loaded_at = datetime.now()
@@ -268,7 +297,11 @@ class ScanOpportunitiesUseCase:
                 *[
                     load_fee_cache(
                         spot_ex,
-                        [symbol for symbol in cfg.symbols if symbol in exchange_data_by_id.get(spot_ex.info.id, {}).get('tickers', {})],
+                        [
+                            symbol
+                            for symbol in cfg.symbols
+                            if symbol in exchange_data_by_id.get(spot_ex.info.id, {}).get('tickers', {})
+                        ],
                         spot_fee_cache,
                         'spot-fee',
                     )
@@ -288,6 +321,94 @@ class ScanOpportunitiesUseCase:
                 return_exceptions=True,
             )
             fees_loaded_at = datetime.now()
+
+            required_spot_books: dict[str, set[str]] = {
+                exchange_id: set(data['books'])
+                for exchange_id, data in exchange_data_by_id.items()
+            }
+            required_futures_books: dict[str, set[str]] = {}
+            futures_spot_route_count = 0
+
+            if cfg.enable_futures_spot and need_futures_books:
+                for symbol in cfg.symbols:
+                    route_candidates: list[tuple[float, str, str]] = []
+                    for spot_ex in self._spot:
+                        spot_data = exchange_data_by_id.get(spot_ex.info.id)
+                        if not spot_data:
+                            continue
+                        spot_ticker = spot_data['tickers'].get(symbol)
+                        if not spot_ticker:
+                            continue
+                        for futures_ex in self._futures:
+                            futures_ticker = futures_tickers_cache.get(futures_ex.info.id, {}).get(symbol)
+                            if not futures_ticker:
+                                continue
+                            estimated_profit_percent = self._estimate_futures_spot_entry_profit_percent(
+                                spot_ticker,
+                                futures_ticker,
+                                cfg.position_size_usdt,
+                                spot_fee_cache.get((spot_ex.info.id, symbol), spot_ex.info.fee),
+                                futures_fee_cache.get((futures_ex.info.id, symbol), futures_ex.info.fee),
+                                cfg.futures_spot_long_only,
+                            )
+                            if estimated_profit_percent <= 0:
+                                continue
+                            route_candidates.append(
+                                (estimated_profit_percent, spot_ex.info.id, futures_ex.info.id)
+                            )
+                    route_candidates.sort(reverse=True)
+                    futures_spot_route_count += min(len(route_candidates), 3)
+                    for _, spot_exchange_id, futures_exchange_id in route_candidates[:3]:
+                        required_spot_books.setdefault(spot_exchange_id, set()).add(symbol)
+                        required_futures_books.setdefault(futures_exchange_id, set()).add(symbol)
+
+                logger.info(
+                    'scan_prefilter futures_spot_routes=%s spot_books=%s futures_books=%s timeout_ms=%s',
+                    futures_spot_route_count,
+                    sum(len(symbols) for symbols in required_spot_books.values()),
+                    sum(len(symbols) for symbols in required_futures_books.values()),
+                    cfg.scan_request_timeout_ms,
+                )
+
+                spot_book_results = await asyncio.gather(
+                    *[
+                        load_books(
+                            spot_ex,
+                            sorted(required_spot_books.get(spot_ex.info.id, set())),
+                            spot_limit,
+                            'spot-book',
+                        )
+                        for spot_ex in self._spot
+                        if required_spot_books.get(spot_ex.info.id)
+                    ],
+                    return_exceptions=True,
+                )
+                for spot_ex, books in zip(
+                    [spot_ex for spot_ex in self._spot if required_spot_books.get(spot_ex.info.id)],
+                    spot_book_results,
+                ):
+                    if isinstance(books, dict):
+                        exchange_data_by_id[spot_ex.info.id]['books'].update(books)
+
+                futures_book_results = await asyncio.gather(
+                    *[
+                        load_books(
+                            futures_ex,
+                            sorted(required_futures_books.get(futures_ex.info.id, set())),
+                            futures_limit,
+                            'futures-book',
+                        )
+                        for futures_ex in self._futures
+                        if required_futures_books.get(futures_ex.info.id)
+                    ],
+                    return_exceptions=True,
+                )
+                for futures_ex, books in zip(
+                    [futures_ex for futures_ex in self._futures if required_futures_books.get(futures_ex.info.id)],
+                    futures_book_results,
+                ):
+                    if isinstance(books, dict):
+                        futures_books_cache[futures_ex.info.id] = books
 
             best_per_symbol: dict[str, ArbitrageOpportunity] = {}
 
@@ -405,6 +526,29 @@ class ScanOpportunitiesUseCase:
             futures_prices=futures_prices,
             futures_funding=futures_funding,
         )
+
+    def _estimate_futures_spot_entry_profit_percent(
+        self,
+        spot_ticker: Optional[Ticker],
+        futures_ticker: Optional[FuturesTicker],
+        position_usdt: float,
+        spot_fee: Fee,
+        futures_fee: Fee,
+        long_only: bool,
+    ) -> float:
+        if spot_ticker is None or futures_ticker is None or position_usdt <= 0:
+            return float('-inf')
+        spot_entry = spot_ticker.ask or spot_ticker.last
+        futures_entry = futures_ticker.bid or futures_ticker.last
+        if spot_entry <= 0 or futures_entry <= 0:
+            return float('-inf')
+        basis = futures_entry - spot_entry
+        if long_only and basis < 0:
+            return float('-inf')
+        entry_quantity = position_usdt / spot_entry
+        gross_edge_usdt = basis * entry_quantity
+        fee_total_usdt = position_usdt * (spot_fee.taker + futures_fee.taker) * 2
+        return ((gross_edge_usdt - fee_total_usdt) / position_usdt) * 100
 
 
 class ExecuteDemoTradeUseCase:

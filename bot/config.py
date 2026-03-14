@@ -25,6 +25,7 @@ class TelegramConfig:
 class AppConfig:
     mode: str
     scan_interval_ms: int
+    scan_request_timeout_ms: int
     min_profit_percent: float
     max_position_usdt: float
     max_open_positions: int
@@ -91,6 +92,7 @@ def _env_csv(name: str, default: list[str]) -> list[str]:
 config = AppConfig(
     mode=_mode_from_args() or os.getenv('MODE', 'demo'),
     scan_interval_ms=int(os.getenv('SCAN_INTERVAL_MS', '3000')),
+    scan_request_timeout_ms=max(int(os.getenv('SCAN_REQUEST_TIMEOUT_MS', '8000')), 1000),
     min_profit_percent=float(os.getenv('MIN_PROFIT_PERCENT', '0.1')),
     max_position_usdt=float(os.getenv('MAX_POSITION_USDT', '100')),
     max_open_positions=max(int(os.getenv('MAX_OPEN_POSITIONS', '1')), 1),
