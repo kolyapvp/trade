@@ -59,8 +59,9 @@ class CcxtExchangeAdapter(IExchange):
 
     async def fetch_ticker(self, symbol: str) -> Ticker:
         market_symbol, raw = await self._call_exchange_method('fetch_ticker', symbol)
+        requested_symbol = self._symbol_to_requested(symbol, market_symbol)
         return Ticker(
-            symbol=market_symbol,
+            symbol=requested_symbol,
             exchange_id=self.info.id,
             bid=raw.get('bid') or 0.0,
             ask=raw.get('ask') or 0.0,
@@ -70,78 +71,57 @@ class CcxtExchangeAdapter(IExchange):
         )
 
     async def fetch_tickers(self, symbols: list[str]) -> list[Ticker]:
+        if not symbols:
+            return []
+        if not self._exchange.has.get('fetchTickers'):
+            raise RuntimeError(f'{self.info.id} does not support fetch_tickers')
+        requested_by_market = await self._prepare_symbol_map(symbols)
+        raw = await self._exchange.fetch_tickers(list(requested_by_market))
         result: list[Ticker] = []
-        if self._exchange.has.get('fetchTickers'):
-            try:
-                raw = await self._exchange.fetch_tickers(symbols)
-                for symbol in symbols:
-                    t = raw.get(symbol)
-                    if t:
-                        result.append(Ticker(
-                            symbol=symbol,
-                            exchange_id=self.info.id,
-                            bid=t.get('bid') or 0.0,
-                            ask=t.get('ask') or 0.0,
-                            last=t.get('last') or 0.0,
-                            volume=t.get('baseVolume') or 0.0,
-                            timestamp=t.get('timestamp') or 0,
-                        ))
-                return result
-            except Exception:
-                pass
-
-        for symbol in symbols:
-            try:
-                result.append(await self.fetch_ticker(symbol))
-            except Exception:
-                pass
+        for market_symbol, requested_symbol in requested_by_market.items():
+            ticker = raw.get(market_symbol)
+            if ticker is None:
+                continue
+            result.append(self._build_ticker(requested_symbol, ticker))
         return result
 
     async def fetch_futures_ticker(self, symbol: str) -> Optional[FuturesTicker]:
         if not self.info.supports_futures:
             return None
-        try:
-            market_symbol, raw = await self._call_exchange_method('fetch_ticker', symbol)
-            funding = await self._fetch_funding_rate(market_symbol)
-            return self._build_futures_ticker(symbol, market_symbol, raw, funding)
-        except Exception:
-            return None
+        market_symbol, raw = await self._call_exchange_method('fetch_ticker', symbol)
+        funding = await self._fetch_funding_rate(market_symbol)
+        return self._build_futures_ticker(
+            self._symbol_to_requested(symbol, market_symbol),
+            market_symbol,
+            raw,
+            funding,
+        )
 
     async def fetch_futures_tickers(self, symbols: list[str]) -> list[FuturesTicker]:
         if not self.info.supports_futures:
             return []
+        if not symbols:
+            return []
+        if not self._exchange.has.get('fetchTickers'):
+            raise RuntimeError(f'{self.info.id} does not support fetch_tickers')
 
-        spot_like_tickers = await self.fetch_tickers(symbols)
-        ticker_map = {ticker.symbol: ticker for ticker in spot_like_tickers}
-        funding_map: dict[str, dict] = {}
-        funding_semaphore = asyncio.Semaphore(min(max(len(symbols), 1), 4))
-
-        async def load_funding(symbol: str) -> None:
-            async with funding_semaphore:
-                market_symbol = await self._prepare_symbol(symbol)
-                funding = await self._fetch_funding_rate(market_symbol)
-                if funding:
-                    funding_map[symbol] = funding
-
-        await asyncio.gather(*[load_funding(symbol) for symbol in symbols], return_exceptions=True)
+        requested_by_market = await self._prepare_symbol_map(symbols)
+        raw_tickers = await self._exchange.fetch_tickers(list(requested_by_market))
+        funding_map = await self._fetch_funding_rates(list(requested_by_market))
 
         result: list[FuturesTicker] = []
-        for symbol in symbols:
-            ticker = ticker_map.get(symbol)
+        for market_symbol, requested_symbol in requested_by_market.items():
+            ticker = raw_tickers.get(market_symbol)
             if ticker is None:
-                single = await self.fetch_futures_ticker(symbol)
-                if single is not None:
-                    result.append(single)
                 continue
-            raw = {
-                'bid': ticker.bid,
-                'ask': ticker.ask,
-                'last': ticker.last,
-                'baseVolume': ticker.volume,
-                'timestamp': ticker.timestamp,
-                'info': {},
-            }
-            result.append(self._build_futures_ticker(symbol, symbol, raw, funding_map.get(symbol)))
+            result.append(
+                self._build_futures_ticker(
+                    requested_symbol,
+                    market_symbol,
+                    ticker,
+                    funding_map.get(market_symbol),
+                )
+            )
         return result
 
     async def fetch_free_balance(self, currency: str) -> float:
@@ -636,6 +616,13 @@ class CcxtExchangeAdapter(IExchange):
             await self._ensure_markets_loaded()
         return self._symbol_cache.get(symbol, symbol)
 
+    async def _prepare_symbol_map(self, symbols: list[str]) -> dict[str, str]:
+        requested_by_market: dict[str, str] = {}
+        for symbol in symbols:
+            market_symbol = await self._prepare_symbol(symbol)
+            requested_by_market[market_symbol] = symbol
+        return requested_by_market
+
     async def _get_market(self, symbol: str) -> tuple[str, dict]:
         await self._ensure_markets_loaded()
         market_symbol = await self._resolve_alias_symbol(symbol)
@@ -689,6 +676,45 @@ class CcxtExchangeAdapter(IExchange):
             return await self._exchange.fetch_funding_rate(market_symbol)
         except Exception:
             return None
+
+    async def _fetch_funding_rates(self, market_symbols: list[str]) -> dict[str, dict]:
+        if not market_symbols:
+            return {}
+        if not self._supports('fetchFundingRates'):
+            return {}
+        fetch_funding_rates = getattr(self._exchange, 'fetch_funding_rates', None)
+        if not callable(fetch_funding_rates):
+            return {}
+        try:
+            raw = await fetch_funding_rates(market_symbols)
+        except Exception:
+            return {}
+        funding_map: dict[str, dict] = {}
+        if isinstance(raw, dict):
+            for symbol_key, funding in raw.items():
+                if isinstance(funding, dict):
+                    funding_symbol = str(funding.get('symbol') or symbol_key)
+                    funding_map[funding_symbol] = funding
+            return funding_map
+        if isinstance(raw, list):
+            for funding in raw:
+                if not isinstance(funding, dict):
+                    continue
+                funding_symbol = str(funding.get('symbol') or '')
+                if funding_symbol:
+                    funding_map[funding_symbol] = funding
+        return funding_map
+
+    def _build_ticker(self, requested_symbol: str, raw: dict) -> Ticker:
+        return Ticker(
+            symbol=requested_symbol,
+            exchange_id=self.info.id,
+            bid=raw.get('bid') or 0.0,
+            ask=raw.get('ask') or 0.0,
+            last=raw.get('last') or 0.0,
+            volume=raw.get('baseVolume') or 0.0,
+            timestamp=raw.get('timestamp') or 0,
+        )
 
     def _build_futures_ticker(
         self,
@@ -744,6 +770,15 @@ class CcxtExchangeAdapter(IExchange):
     def _supports(self, capability: str) -> bool:
         value = getattr(self._exchange, 'has', {}).get(capability)
         return bool(value)
+
+    def _symbol_to_requested(self, requested_symbol: str, market_symbol: str) -> str:
+        cached = self._symbol_cache.get(requested_symbol)
+        if cached == market_symbol:
+            return requested_symbol
+        for source_symbol, cached_symbol in self._symbol_cache.items():
+            if cached_symbol == market_symbol:
+                return source_symbol
+        return requested_symbol
 
     async def _resolve_symbol_from_exception(self, symbol: str, exc: Exception) -> str:
         if not self._is_unknown_symbol_error(exc):

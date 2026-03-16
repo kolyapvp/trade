@@ -41,6 +41,9 @@ class AppConfig:
     futures_spot_basis_history_window: int
     futures_spot_basis_min_samples: int
     futures_spot_min_basis_zscore: float
+    futures_spot_min_funding_rate: float
+    futures_spot_max_mark_price_deviation_percent: float
+    futures_spot_max_index_price_deviation_percent: float
     futures_spot_route_history_size: int
     futures_spot_route_min_closed_trades: int
     futures_spot_route_min_win_rate: float
@@ -115,6 +118,15 @@ config = AppConfig(
     futures_spot_basis_history_window=max(int(os.getenv('FUTURES_SPOT_BASIS_HISTORY_WINDOW', '240')), 10),
     futures_spot_basis_min_samples=max(int(os.getenv('FUTURES_SPOT_BASIS_MIN_SAMPLES', '30')), 2),
     futures_spot_min_basis_zscore=float(os.getenv('FUTURES_SPOT_MIN_BASIS_ZSCORE', '1.2')),
+    futures_spot_min_funding_rate=float(os.getenv('FUTURES_SPOT_MIN_FUNDING_RATE', '0.0')),
+    futures_spot_max_mark_price_deviation_percent=max(
+        float(os.getenv('FUTURES_SPOT_MAX_MARK_PRICE_DEVIATION_PERCENT', '0.25')),
+        0.0,
+    ),
+    futures_spot_max_index_price_deviation_percent=max(
+        float(os.getenv('FUTURES_SPOT_MAX_INDEX_PRICE_DEVIATION_PERCENT', '0.35')),
+        0.0,
+    ),
     futures_spot_route_history_size=max(int(os.getenv('FUTURES_SPOT_ROUTE_HISTORY_SIZE', '50')), 5),
     futures_spot_route_min_closed_trades=max(int(os.getenv('FUTURES_SPOT_ROUTE_MIN_CLOSED_TRADES', '5')), 1),
     futures_spot_route_min_win_rate=min(max(float(os.getenv('FUTURES_SPOT_ROUTE_MIN_WIN_RATE', '0.4')), 0.0), 1.0),

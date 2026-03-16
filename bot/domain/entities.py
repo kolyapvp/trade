@@ -46,6 +46,8 @@ class FuturesSpotDetails:
     close_reserve_usdt: float = 0.0
     basis_zscore: float = 0.0
     liquidity_ratio: float = 0.0
+    mark_price_deviation_percent: float = 0.0
+    index_price_deviation_percent: float = 0.0
     route_win_rate: float = 0.0
     route_median_underperformance_usdt: float = 0.0
 
@@ -691,6 +693,8 @@ def _parse_strategy_details(strategy: str, details: dict) -> StrategyDetails:
         close_reserve_usdt=float(details.get('close_reserve_usdt', 0.0)),
         basis_zscore=float(details.get('basis_zscore', 0.0)),
         liquidity_ratio=float(details.get('liquidity_ratio', 0.0)),
+        mark_price_deviation_percent=float(details.get('mark_price_deviation_percent', 0.0)),
+        index_price_deviation_percent=float(details.get('index_price_deviation_percent', 0.0)),
         route_win_rate=float(details.get('route_win_rate', 0.0)),
         route_median_underperformance_usdt=float(details.get('route_median_underperformance_usdt', 0.0)),
     )

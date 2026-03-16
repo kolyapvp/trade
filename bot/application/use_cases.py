@@ -95,6 +95,13 @@ class ScanOpportunitiesUseCase:
         self._exchange_error_streaks: dict[str, int] = {}
         self._exchange_cooldowns: dict[str, datetime] = {}
 
+    @staticmethod
+    def _describe_exception(exc: Exception) -> str:
+        message = str(exc).strip()
+        if message:
+            return f'{type(exc).__name__}: {message}'
+        return type(exc).__name__
+
     def bootstrap_futures_spot_trades(self, trades: list[VirtualTrade]) -> None:
         self._detector.bootstrap_futures_spot_trades(trades)
 
@@ -135,7 +142,7 @@ class ScanOpportunitiesUseCase:
                             exchange.fetch_order_book(symbol, cfg.futures_spot_book_depth_limit)
                         )
                     except Exception as e:
-                        errors.append(f'{error_prefix} {exchange.info.id} {symbol}: {e}')
+                        errors.append(f'{error_prefix} {exchange.info.id} {symbol}: {self._describe_exception(e)}')
 
             await asyncio.gather(
                 *[load_symbol_book(symbol) for symbol in symbols],
@@ -153,7 +160,7 @@ class ScanOpportunitiesUseCase:
                 fetched_tickers = await run_with_timeout(exchange.fetch_tickers(cfg.symbols))
                 tickers.update({ticker.symbol: ticker for ticker in fetched_tickers})
             except Exception as e:
-                errors.append(f'{exchange.info.id} tickers: {e}')
+                errors.append(f'{exchange.info.id} tickers: {self._describe_exception(e)}')
                 bulk_failed = True
 
             missing_tickers = [symbol for symbol in cfg.symbols if symbol not in tickers]
@@ -165,7 +172,7 @@ class ScanOpportunitiesUseCase:
                         try:
                             tickers[symbol] = await run_with_timeout(exchange.fetch_ticker(symbol))
                         except Exception as e:
-                            errors.append(f'{exchange.info.id} ticker {symbol}: {e}')
+                            errors.append(f'{exchange.info.id} ticker {symbol}: {self._describe_exception(e)}')
 
                 await asyncio.gather(*[load_ticker(symbol) for symbol in missing_tickers], return_exceptions=True)
 
@@ -252,25 +259,10 @@ class ScanOpportunitiesUseCase:
                 cache: dict[str, FuturesTicker] = {}
                 bulk_failed = False
                 try:
-                    if cfg.enable_futures_funding:
-                        fetched_tickers = await run_with_timeout(futures_ex.fetch_futures_tickers(cfg.symbols))
-                    else:
-                        spot_like_tickers = await run_with_timeout(futures_ex.fetch_tickers(cfg.symbols))
-                        fetched_tickers = [
-                            FuturesTicker(
-                                symbol=ticker.symbol,
-                                exchange_id=ticker.exchange_id,
-                                bid=ticker.bid,
-                                ask=ticker.ask,
-                                last=ticker.last,
-                                volume=ticker.volume,
-                                timestamp=ticker.timestamp,
-                            )
-                            for ticker in spot_like_tickers
-                        ]
+                    fetched_tickers = await run_with_timeout(futures_ex.fetch_futures_tickers(cfg.symbols))
                     cache.update({ticker.symbol: ticker for ticker in fetched_tickers})
                 except Exception as e:
-                    errors.append(f'futures {futures_ex.info.id} tickers: {e}')
+                    errors.append(f'futures {futures_ex.info.id} tickers: {self._describe_exception(e)}')
                     bulk_failed = True
 
                 missing_symbols = [symbol for symbol in cfg.symbols if symbol not in cache]
@@ -284,7 +276,9 @@ class ScanOpportunitiesUseCase:
                                 if ft:
                                     cache[symbol] = ft
                             except Exception as e:
-                                errors.append(f'futures {futures_ex.info.id} {symbol}: {e}')
+                                errors.append(
+                                    f'futures {futures_ex.info.id} {symbol}: {self._describe_exception(e)}'
+                                )
 
                     await asyncio.gather(*[load_symbol(symbol) for symbol in missing_symbols], return_exceptions=True)
                 if cache and self._has_sufficient_symbol_coverage(len(cache), len(cfg.symbols)):
@@ -324,7 +318,7 @@ class ScanOpportunitiesUseCase:
                             target[cache_key] = fee
                             self._fee_cache[cache_key] = fee
                         except Exception as e:
-                            errors.append(f'{prefix} {exchange.info.id} {symbol}: {e}')
+                            errors.append(f'{prefix} {exchange.info.id} {symbol}: {self._describe_exception(e)}')
 
                 await asyncio.gather(*[load_symbol_fee(symbol) for symbol in symbols], return_exceptions=True)
 
@@ -486,7 +480,10 @@ class ScanOpportunitiesUseCase:
                                 if prev is None or opp.profit_percent > prev.profit_percent:
                                     best_per_symbol[symbol] = opp
                         except Exception as e:
-                            errors.append(f'futures-spot {spot_ex.info.id}×{futures_ex.info.id} {symbol}: {e}')
+                            errors.append(
+                                f'futures-spot {spot_ex.info.id}×{futures_ex.info.id} {symbol}: '
+                                f'{self._describe_exception(e)}'
+                            )
 
             opportunities.extend(best_per_symbol.values())
 
@@ -528,7 +525,10 @@ class ScanOpportunitiesUseCase:
                                     if prev is None or opp.profit_percent > prev.profit_percent:
                                         best_funding_per_symbol[symbol] = opp
                             except Exception as e:
-                                errors.append(f'futures-funding {long_ex.info.id}×{short_ex.info.id} {symbol}: {e}')
+                                errors.append(
+                                    f'futures-funding {long_ex.info.id}×{short_ex.info.id} {symbol}: '
+                                    f'{self._describe_exception(e)}'
+                                )
 
                 opportunities.extend(best_funding_per_symbol.values())
             futures_detected_at = datetime.now()

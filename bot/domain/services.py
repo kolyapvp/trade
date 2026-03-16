@@ -28,6 +28,9 @@ class FuturesSpotRiskConfig:
     basis_history_window: int = 240
     basis_min_samples: int = 30
     min_basis_zscore: float = 1.2
+    min_funding_rate: float = 0.0
+    max_mark_price_deviation_percent: float = 0.25
+    max_index_price_deviation_percent: float = 0.35
     route_history_size: int = 50
     route_min_closed_trades: int = 5
     route_min_win_rate: float = 0.4
@@ -471,6 +474,26 @@ class ArbitrageDetector:
         if not self._passes_futures_spot_liquidity_filters(spot_book, futures_book):
             return None
 
+        mark_price_deviation_percent = self._price_deviation_percent(
+            futures_ticker.bid or futures_ticker.last,
+            futures_ticker.mark_price,
+        )
+        if (
+            futures_ticker.mark_price > 0
+            and mark_price_deviation_percent > self._futures_spot_risk.max_mark_price_deviation_percent
+        ):
+            return None
+
+        index_price_deviation_percent = self._price_deviation_percent(
+            futures_ticker.bid or futures_ticker.last,
+            futures_ticker.index_price,
+        )
+        if (
+            futures_ticker.index_price > 0
+            and index_price_deviation_percent > self._futures_spot_risk.max_index_price_deviation_percent
+        ):
+            return None
+
         result = self._calc.calculate_futures_spot(
             spot_book,
             futures_book,
@@ -482,6 +505,8 @@ class ArbitrageDetector:
 
         basis = result['basis']
         if long_only and basis < 0:
+            return None
+        if not self._passes_futures_spot_funding_filter(basis, futures_ticker.funding_rate, long_only):
             return None
 
         if result['liquidity_ratio'] < self._futures_spot_risk.min_depth_ratio:
@@ -536,6 +561,8 @@ class ArbitrageDetector:
                 close_reserve_usdt=result['close_reserve_usdt'],
                 basis_zscore=basis_snapshot.zscore,
                 liquidity_ratio=result['liquidity_ratio'],
+                mark_price_deviation_percent=mark_price_deviation_percent,
+                index_price_deviation_percent=index_price_deviation_percent,
                 route_win_rate=route_quality.win_rate,
                 route_median_underperformance_usdt=route_quality.median_underperformance_usdt,
             ),
@@ -579,6 +606,24 @@ class ArbitrageDetector:
         if route_quality.p95_underperformance_usdt > self._futures_spot_risk.route_max_p95_underperformance_usdt:
             return True
         return False
+
+    def _passes_futures_spot_funding_filter(
+        self,
+        basis: float,
+        funding_rate: float,
+        long_only: bool,
+    ) -> bool:
+        min_funding_rate = self._futures_spot_risk.min_funding_rate
+        if min_funding_rate <= 0:
+            return True
+        if long_only or basis >= 0:
+            return funding_rate >= min_funding_rate
+        return funding_rate <= -min_funding_rate
+
+    def _price_deviation_percent(self, execution_price: float, reference_price: float) -> float:
+        if execution_price <= 0 or reference_price <= 0:
+            return 0.0
+        return abs(execution_price - reference_price) / reference_price * 100
 
     def detect_futures_funding(
         self,
