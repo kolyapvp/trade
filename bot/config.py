@@ -26,6 +26,8 @@ class AppConfig:
     mode: str
     scan_interval_ms: int
     scan_request_timeout_ms: int
+    exchange_error_cooldown_seconds: int
+    exchange_error_threshold: int
     min_profit_percent: float
     max_position_usdt: float
     max_open_positions: int
@@ -44,6 +46,8 @@ class AppConfig:
     futures_spot_route_min_win_rate: float
     futures_spot_route_max_median_underperformance_usdt: float
     futures_spot_route_max_p95_underperformance_usdt: float
+    futures_spot_prefilter_profit_floor_percent: float
+    futures_spot_prefilter_max_routes_per_symbol: int
     live_reconcile_interval_seconds: int
     live_orphan_notional_threshold_usdt: float
     spot_scan_concurrency: int
@@ -93,6 +97,8 @@ config = AppConfig(
     mode=_mode_from_args() or os.getenv('MODE', 'demo'),
     scan_interval_ms=int(os.getenv('SCAN_INTERVAL_MS', '3000')),
     scan_request_timeout_ms=max(int(os.getenv('SCAN_REQUEST_TIMEOUT_MS', '8000')), 1000),
+    exchange_error_cooldown_seconds=max(int(os.getenv('SCAN_EXCHANGE_ERROR_COOLDOWN_SECONDS', '1800')), 60),
+    exchange_error_threshold=max(int(os.getenv('SCAN_EXCHANGE_ERROR_THRESHOLD', '3')), 1),
     min_profit_percent=float(os.getenv('MIN_PROFIT_PERCENT', '0.1')),
     max_position_usdt=float(os.getenv('MAX_POSITION_USDT', '100')),
     max_open_positions=max(int(os.getenv('MAX_OPEN_POSITIONS', '1')), 1),
@@ -119,6 +125,13 @@ config = AppConfig(
     futures_spot_route_max_p95_underperformance_usdt=max(
         float(os.getenv('FUTURES_SPOT_ROUTE_MAX_P95_UNDERPERFORMANCE_USDT', '0.35')),
         0.0,
+    ),
+    futures_spot_prefilter_profit_floor_percent=float(
+        os.getenv('FUTURES_SPOT_PREFILTER_PROFIT_FLOOR_PERCENT', '-0.05')
+    ),
+    futures_spot_prefilter_max_routes_per_symbol=max(
+        int(os.getenv('FUTURES_SPOT_PREFILTER_MAX_ROUTES_PER_SYMBOL', '5')),
+        1,
     ),
     live_reconcile_interval_seconds=max(int(os.getenv('LIVE_RECONCILE_INTERVAL_SECONDS', '30')), 5),
     live_orphan_notional_threshold_usdt=float(os.getenv('LIVE_ORPHAN_NOTIONAL_THRESHOLD_USDT', '5')),

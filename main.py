@@ -111,8 +111,11 @@ async def bootstrap() -> None:
 
         factory = ExchangeFactory()
         cx = config.exchanges
+        use_private_api = config.mode == 'real'
 
         def has_private_api(name: str) -> bool:
+            if not use_private_api:
+                return False
             credentials = cx.get(name)
             if not credentials or not credentials.api_key or not credentials.secret:
                 return False
@@ -250,6 +253,8 @@ async def bootstrap() -> None:
             min_profit_percent=config.min_profit_percent,
             triangular_paths=TRIANGULAR_PATHS,
             scan_request_timeout_ms=config.scan_request_timeout_ms,
+            exchange_error_cooldown_seconds=config.exchange_error_cooldown_seconds,
+            exchange_error_threshold=config.exchange_error_threshold,
             spot_scan_concurrency=config.spot_scan_concurrency,
             futures_scan_concurrency=config.futures_scan_concurrency,
             enable_cross_exchange=config.strategies.get('cross_exchange', True),
@@ -258,6 +263,8 @@ async def bootstrap() -> None:
             enable_futures_funding=config.strategies.get('futures_funding', True),
             futures_spot_long_only=config.futures_spot_long_only,
             futures_spot_book_depth_limit=config.futures_spot_book_depth_limit,
+            futures_spot_prefilter_profit_floor_percent=config.futures_spot_prefilter_profit_floor_percent,
+            futures_spot_prefilter_max_routes_per_symbol=config.futures_spot_prefilter_max_routes_per_symbol,
         )
 
         futures_spot_risk = FuturesSpotRiskConfig(

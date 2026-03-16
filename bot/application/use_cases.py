@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -49,6 +49,8 @@ class ScanConfig:
     min_profit_percent: float
     triangular_paths: list[TriangularPathConfig]
     scan_request_timeout_ms: int = 8000
+    exchange_error_cooldown_seconds: int = 1800
+    exchange_error_threshold: int = 3
     spot_scan_concurrency: int = 6
     futures_scan_concurrency: int = 4
     enable_cross_exchange: bool = True
@@ -57,6 +59,8 @@ class ScanConfig:
     enable_futures_funding: bool = True
     futures_spot_long_only: bool = True
     futures_spot_book_depth_limit: int = 20
+    futures_spot_prefilter_profit_floor_percent: float = -0.05
+    futures_spot_prefilter_max_routes_per_symbol: int = 5
 
 
 @dataclass
@@ -88,6 +92,8 @@ class ScanOpportunitiesUseCase:
             futures_spot_route_quality_monitor=futures_spot_route_quality_monitor,
         )
         self._fee_cache: dict[tuple[str, str], Fee] = {}
+        self._exchange_error_streaks: dict[str, int] = {}
+        self._exchange_cooldowns: dict[str, datetime] = {}
 
     def bootstrap_futures_spot_trades(self, trades: list[VirtualTrade]) -> None:
         self._detector.bootstrap_futures_spot_trades(trades)
@@ -97,6 +103,7 @@ class ScanOpportunitiesUseCase:
 
     async def execute(self, cfg: ScanConfig) -> ScanResult:
         start = datetime.now()
+        now_utc = datetime.now(timezone.utc)
         opportunities: list[ArbitrageOpportunity] = []
         observed_opportunities: list[ArbitrageOpportunity] = []
         errors: list[str] = []
@@ -137,12 +144,17 @@ class ScanOpportunitiesUseCase:
             return books
 
         async def load_exchange(exchange: IExchange) -> None:
+            exchange_key = self._exchange_scope_key('spot', exchange.info.id)
+            if self._is_exchange_in_cooldown(exchange_key, now_utc):
+                return
             tickers: dict[str, Ticker] = {}
+            bulk_failed = False
             try:
                 fetched_tickers = await run_with_timeout(exchange.fetch_tickers(cfg.symbols))
                 tickers.update({ticker.symbol: ticker for ticker in fetched_tickers})
             except Exception as e:
                 errors.append(f'{exchange.info.id} tickers: {e}')
+                bulk_failed = True
 
             missing_tickers = [symbol for symbol in cfg.symbols if symbol not in tickers]
             if missing_tickers:
@@ -157,13 +169,22 @@ class ScanOpportunitiesUseCase:
 
                 await asyncio.gather(*[load_ticker(symbol) for symbol in missing_tickers], return_exceptions=True)
 
-            if tickers:
+            if tickers and self._has_sufficient_symbol_coverage(len(tickers), len(cfg.symbols)):
+                self._mark_exchange_success(exchange_key)
                 exchange_data.append({
                     'exchange_id': exchange.info.id,
                     'fee': exchange.info.fee,
                     'books': {},
                     'tickers': tickers,
                 })
+                return
+
+            if bulk_failed or tickers:
+                self._mark_exchange_failure(
+                    exchange_key,
+                    cfg,
+                    f'spot_tickers_coverage={len(tickers)}/{len(cfg.symbols)}',
+                )
 
         await asyncio.gather(*[load_exchange(ex) for ex in self._spot], return_exceptions=True)
         spot_loaded_at = datetime.now()
@@ -225,7 +246,11 @@ class ScanOpportunitiesUseCase:
 
         if (cfg.enable_futures_spot or cfg.enable_futures_funding) and self._futures:
             async def load_futures_exchange(futures_ex: IExchange) -> None:
+                exchange_key = self._exchange_scope_key('futures', futures_ex.info.id)
+                if self._is_exchange_in_cooldown(exchange_key, now_utc):
+                    return
                 cache: dict[str, FuturesTicker] = {}
+                bulk_failed = False
                 try:
                     if cfg.enable_futures_funding:
                         fetched_tickers = await run_with_timeout(futures_ex.fetch_futures_tickers(cfg.symbols))
@@ -246,6 +271,7 @@ class ScanOpportunitiesUseCase:
                     cache.update({ticker.symbol: ticker for ticker in fetched_tickers})
                 except Exception as e:
                     errors.append(f'futures {futures_ex.info.id} tickers: {e}')
+                    bulk_failed = True
 
                 missing_symbols = [symbol for symbol in cfg.symbols if symbol not in cache]
                 if missing_symbols:
@@ -261,10 +287,19 @@ class ScanOpportunitiesUseCase:
                                 errors.append(f'futures {futures_ex.info.id} {symbol}: {e}')
 
                     await asyncio.gather(*[load_symbol(symbol) for symbol in missing_symbols], return_exceptions=True)
-                if cache:
+                if cache and self._has_sufficient_symbol_coverage(len(cache), len(cfg.symbols)):
+                    self._mark_exchange_success(exchange_key)
                     futures_tickers_cache[futures_ex.info.id] = cache
                     futures_prices[futures_ex.info.id] = {s: ft.last for s, ft in cache.items()}
                     futures_funding[futures_ex.info.id] = {s: ft.funding_rate for s, ft in cache.items()}
+                    return
+
+                if bulk_failed or cache:
+                    self._mark_exchange_failure(
+                        exchange_key,
+                        cfg,
+                        f'futures_tickers_coverage={len(cache)}/{len(cfg.symbols)}',
+                    )
 
             await asyncio.gather(*[load_futures_exchange(ex) for ex in self._futures], return_exceptions=True)
             futures_loaded_at = datetime.now()
@@ -351,14 +386,15 @@ class ScanOpportunitiesUseCase:
                                 futures_fee_cache.get((futures_ex.info.id, symbol), futures_ex.info.fee),
                                 cfg.futures_spot_long_only,
                             )
-                            if estimated_profit_percent <= 0:
+                            if estimated_profit_percent < cfg.futures_spot_prefilter_profit_floor_percent:
                                 continue
                             route_candidates.append(
                                 (estimated_profit_percent, spot_ex.info.id, futures_ex.info.id)
                             )
                     route_candidates.sort(reverse=True)
-                    futures_spot_route_count += min(len(route_candidates), 3)
-                    for _, spot_exchange_id, futures_exchange_id in route_candidates[:3]:
+                    selected_routes = route_candidates[:cfg.futures_spot_prefilter_max_routes_per_symbol]
+                    futures_spot_route_count += len(selected_routes)
+                    for _, spot_exchange_id, futures_exchange_id in selected_routes:
                         required_spot_books.setdefault(spot_exchange_id, set()).add(symbol)
                         required_futures_books.setdefault(futures_exchange_id, set()).add(symbol)
 
@@ -547,8 +583,44 @@ class ScanOpportunitiesUseCase:
             return float('-inf')
         entry_quantity = position_usdt / spot_entry
         gross_edge_usdt = basis * entry_quantity
-        fee_total_usdt = position_usdt * (spot_fee.taker + futures_fee.taker) * 2
-        return ((gross_edge_usdt - fee_total_usdt) / position_usdt) * 100
+        entry_fee_total_usdt = position_usdt * (spot_fee.taker + futures_fee.taker)
+        return ((gross_edge_usdt - entry_fee_total_usdt) / position_usdt) * 100
+
+    def _exchange_scope_key(self, market_type: str, exchange_id: str) -> str:
+        return f'{market_type}:{exchange_id}'
+
+    def _has_sufficient_symbol_coverage(self, available_symbols: int, total_symbols: int) -> bool:
+        if total_symbols <= 0:
+            return False
+        return (available_symbols / total_symbols) >= 0.6
+
+    def _is_exchange_in_cooldown(self, exchange_key: str, now_utc: datetime) -> bool:
+        cooldown_until = self._exchange_cooldowns.get(exchange_key)
+        if cooldown_until is None:
+            return False
+        if cooldown_until <= now_utc:
+            self._exchange_cooldowns.pop(exchange_key, None)
+            return False
+        return True
+
+    def _mark_exchange_success(self, exchange_key: str) -> None:
+        self._exchange_error_streaks.pop(exchange_key, None)
+        self._exchange_cooldowns.pop(exchange_key, None)
+
+    def _mark_exchange_failure(self, exchange_key: str, cfg: ScanConfig, reason: str) -> None:
+        streak = self._exchange_error_streaks.get(exchange_key, 0) + 1
+        if streak < cfg.exchange_error_threshold:
+            self._exchange_error_streaks[exchange_key] = streak
+            return
+        cooldown_until = datetime.now(timezone.utc) + timedelta(seconds=cfg.exchange_error_cooldown_seconds)
+        self._exchange_cooldowns[exchange_key] = cooldown_until
+        self._exchange_error_streaks.pop(exchange_key, None)
+        logger.warning(
+            'scan_exchange_cooldown exchange=%s reason=%s cooldown_until=%s',
+            exchange_key,
+            reason,
+            cooldown_until.isoformat(),
+        )
 
 
 class ExecuteDemoTradeUseCase:
