@@ -44,6 +44,7 @@
 - `ROLLING_SERVICES` — список сервисов, которые безопасно пересоздавать в рамках обычного релиза.
 - `DEPLOY_IMAGE` — полный reference готового образа из registry.
 - `DEPLOY_IMAGE_REGISTRY`, `DEPLOY_IMAGE_USERNAME`, `DEPLOY_IMAGE_PASSWORD` — доступ к registry для pull готового образа.
+- Для production-хоста лучше использовать отдельный долгоживущий read-only token, например через GitHub Actions secret `GHCR_READ_TOKEN`, а `GITHUB_TOKEN` оставить запасным вариантом.
 
 Что важно:
 

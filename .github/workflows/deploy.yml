@@ -106,7 +106,7 @@ jobs:
       DEPLOY_IMAGE: ${{ needs.build_release_image.outputs.deploy_image }}
       DEPLOY_IMAGE_REGISTRY: ghcr.io
       DEPLOY_IMAGE_USERNAME: ${{ github.repository_owner }}
-      DEPLOY_IMAGE_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      DEPLOY_IMAGE_PASSWORD: ${{ secrets.GHCR_READ_TOKEN != '' && secrets.GHCR_READ_TOKEN || secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
