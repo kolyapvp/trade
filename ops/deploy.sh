@@ -12,8 +12,15 @@ DRAIN_POLL_SECONDS="${DRAIN_POLL_SECONDS:-5}"
 DRAIN_TIMEOUT_SECONDS="${DRAIN_TIMEOUT_SECONDS:-1800}"
 WAIT_TIMEOUT_SECONDS="${WAIT_TIMEOUT_SECONDS:-180}"
 ROLLING_SERVICES="${ROLLING_SERVICES:-trade-bot prometheus grafana}"
+FALLBACK_IMAGE_REPOSITORY="${FALLBACK_IMAGE_REPOSITORY:-}"
+FALLBACK_IMAGE_TAG="${FALLBACK_IMAGE_TAG:-}"
+FALLBACK_IMAGE_REGISTRY="${FALLBACK_IMAGE_REGISTRY:-}"
+FALLBACK_IMAGE_USERNAME="${FALLBACK_IMAGE_USERNAME:-}"
+FALLBACK_IMAGE_PASSWORD="${FALLBACK_IMAGE_PASSWORD:-}"
 
 cd "$REPO_DIR"
+
+BUILD_LOG="$(mktemp -t tradebot-deploy-build.XXXXXX.log)"
 
 compose() {
   docker compose "$@"
@@ -37,9 +44,32 @@ clear_deployment_state() {
   set_deployment_state active "$1"
 }
 
+fallback_image_ref() {
+  local tag="${FALLBACK_IMAGE_TAG:-$REMOTE_SHA}"
+  if [ -z "$FALLBACK_IMAGE_REPOSITORY" ]; then
+    return 1
+  fi
+  printf '%s:%s\n' "$FALLBACK_IMAGE_REPOSITORY" "$tag"
+}
+
+build_failed_due_to_pypi() {
+  local log_file="$1"
+  grep -Eiq \
+    'pypi\.org|files\.pythonhosted\.org|Could not find a version that satisfies the requirement|No matching distribution found|ReadTimeoutError|HTTPSConnectionPool|Temporary failure in name resolution|UNEXPECTED_EOF_WHILE_READING|SSLError' \
+    "$log_file"
+}
+
+login_fallback_registry() {
+  if [ -z "$FALLBACK_IMAGE_REGISTRY" ] || [ -z "$FALLBACK_IMAGE_USERNAME" ] || [ -z "$FALLBACK_IMAGE_PASSWORD" ]; then
+    return 0
+  fi
+  printf '%s\n' "$FALLBACK_IMAGE_PASSWORD" | docker login "$FALLBACK_IMAGE_REGISTRY" -u "$FALLBACK_IMAGE_USERNAME" --password-stdin
+}
+
 drain_requested=0
 
 cleanup() {
+  rm -f "$BUILD_LOG"
   if [ "$drain_requested" -eq 1 ]; then
     clear_deployment_state "$REMOTE_SHA" || true
   fi
@@ -106,7 +136,27 @@ if [ -n "$bot_container_id" ] && [ "$(docker inspect -f '{{.State.Running}}' "$b
   done
 fi
 
-compose up -d --build --wait --wait-timeout "$WAIT_TIMEOUT_SECONDS" $ROLLING_SERVICES
+if compose up -d --build --wait --wait-timeout "$WAIT_TIMEOUT_SECONDS" $ROLLING_SERVICES 2>&1 | tee "$BUILD_LOG"; then
+  clear_deployment_state "$REMOTE_SHA"
+  drain_requested=0
+  compose ps
+  exit 0
+fi
+
+if ! build_failed_due_to_pypi "$BUILD_LOG"; then
+  exit 1
+fi
+
+FALLBACK_IMAGE="$(fallback_image_ref || true)"
+if [ -z "$FALLBACK_IMAGE" ]; then
+  echo "build failed due to PyPI availability, but fallback image is not configured"
+  exit 1
+fi
+
+echo "build failed due to PyPI availability, using fallback image: $FALLBACK_IMAGE"
+login_fallback_registry
+TRADE_BOT_IMAGE="$FALLBACK_IMAGE" compose pull "$BOT_SERVICE"
+TRADE_BOT_IMAGE="$FALLBACK_IMAGE" compose up -d --no-build --wait --wait-timeout "$WAIT_TIMEOUT_SECONDS" $ROLLING_SERVICES
 clear_deployment_state "$REMOTE_SHA"
 drain_requested=0
 compose ps
