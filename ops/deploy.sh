@@ -9,6 +9,7 @@ DEPLOY_IMAGE="${DEPLOY_IMAGE:-}"
 DEPLOY_IMAGE_REGISTRY="${DEPLOY_IMAGE_REGISTRY:-}"
 DEPLOY_IMAGE_USERNAME="${DEPLOY_IMAGE_USERNAME:-}"
 DEPLOY_IMAGE_PASSWORD="${DEPLOY_IMAGE_PASSWORD:-}"
+DEPLOY_IMAGE_LOCAL_TAG="${DEPLOY_IMAGE_LOCAL_TAG:-trade-bot:prebuilt}"
 BOT_SERVICE="${BOT_SERVICE:-trade-bot}"
 REDIS_SERVICE="${REDIS_SERVICE:-redis}"
 DEPLOYMENT_KEY="${DEPLOYMENT_KEY:-tradebot:deployment}"
@@ -87,8 +88,9 @@ deploy_prebuilt_image() {
   local password="$4"
   echo "deploying prebuilt image: $image_ref"
   login_registry "$registry" "$username" "$password"
-  TRADE_BOT_IMAGE="$image_ref" compose pull "$BOT_SERVICE"
-  TRADE_BOT_IMAGE="$image_ref" compose up -d --no-build --wait --wait-timeout "$WAIT_TIMEOUT_SECONDS" $ROLLING_SERVICES
+  docker pull "$image_ref"
+  docker tag "$image_ref" "$DEPLOY_IMAGE_LOCAL_TAG"
+  TRADE_BOT_IMAGE="$DEPLOY_IMAGE_LOCAL_TAG" compose up -d --force-recreate --no-build --wait --wait-timeout "$WAIT_TIMEOUT_SECONDS" $ROLLING_SERVICES
 }
 
 drain_requested=0

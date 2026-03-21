@@ -24,6 +24,7 @@
 - Релизный образ собирается в CI там, где доступ к `PyPI` стабильнее, и публикуется в `GHCR`.
 - В production-деплое хост не вызывает `pip install` и не делает `docker build`.
 - Для развёртывания используется `DEPLOY_IMAGE`, который передаётся как полный reference вида `ghcr.io/<owner>/trade-bot@sha256:<digest>`.
+- На хосте этот образ сначала `docker pull`-ится, затем тегируется в локальный alias и только после этого поднимается через `docker compose`, чтобы исключить неоднозначность с digest-reference в compose.
 - В production рекомендуется запускать релиз только из GitHub Actions, а `trade-deploy.timer` держать выключенным, чтобы он не конфликтовал с push-based деплоем.
 
 Резервный путь:
