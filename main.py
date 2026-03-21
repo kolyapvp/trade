@@ -110,7 +110,7 @@ async def bootstrap() -> None:
         await snapshot_repository.initialize()
         await analytics_repository.initialize()
 
-        factory = ExchangeFactory()
+        factory = ExchangeFactory(config.exchange_http_timeout_ms)
         cx = config.exchanges
         use_private_api = config.mode == 'real'
 

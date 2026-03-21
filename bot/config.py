@@ -26,6 +26,7 @@ class AppConfig:
     mode: str
     scan_interval_ms: int
     scan_request_timeout_ms: int
+    exchange_http_timeout_ms: int
     scan_bulk_ticker_batch_size: int
     exchange_error_cooldown_seconds: int
     exchange_error_threshold: int
@@ -117,6 +118,7 @@ config = AppConfig(
     mode=_mode_from_args() or os.getenv('MODE', 'demo'),
     scan_interval_ms=int(os.getenv('SCAN_INTERVAL_MS', '3000')),
     scan_request_timeout_ms=max(int(os.getenv('SCAN_REQUEST_TIMEOUT_MS', '8000')), 1000),
+    exchange_http_timeout_ms=max(int(os.getenv('EXCHANGE_HTTP_TIMEOUT_MS', '20000')), 1000),
     scan_bulk_ticker_batch_size=max(int(os.getenv('SCAN_BULK_TICKER_BATCH_SIZE', '8')), 1),
     exchange_error_cooldown_seconds=max(int(os.getenv('SCAN_EXCHANGE_ERROR_COOLDOWN_SECONDS', '1800')), 60),
     exchange_error_threshold=max(int(os.getenv('SCAN_EXCHANGE_ERROR_THRESHOLD', '3')), 1),
