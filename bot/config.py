@@ -26,6 +26,7 @@ class AppConfig:
     mode: str
     scan_interval_ms: int
     scan_request_timeout_ms: int
+    scan_bulk_ticker_batch_size: int
     exchange_error_cooldown_seconds: int
     exchange_error_threshold: int
     min_profit_percent: float
@@ -68,6 +69,14 @@ class AppConfig:
     exchanges: dict[str, ExchangeCredentials]
     telegram: TelegramConfig
     pairs: list[str]
+    symbol_universe_mode: str
+    symbol_universe_quote_currency: str
+    symbol_universe_max_symbols: int
+    symbol_universe_min_spot_exchanges: int
+    symbol_universe_min_futures_exchanges: int
+    symbol_universe_min_funding_exchanges: int
+    symbol_universe_include: list[str]
+    symbol_universe_exclude: list[str]
     spot_exchange_allowlist: list[str]
     futures_exchange_allowlist: list[str]
     strategies: dict[str, bool]
@@ -96,10 +105,19 @@ def _env_csv(name: str, default: list[str]) -> list[str]:
     return [item for item in values if item]
 
 
+def _env_symbols(name: str, default: list[str]) -> list[str]:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    values = [item.strip().upper() for item in raw.split(',')]
+    return [item for item in values if item]
+
+
 config = AppConfig(
     mode=_mode_from_args() or os.getenv('MODE', 'demo'),
     scan_interval_ms=int(os.getenv('SCAN_INTERVAL_MS', '3000')),
     scan_request_timeout_ms=max(int(os.getenv('SCAN_REQUEST_TIMEOUT_MS', '8000')), 1000),
+    scan_bulk_ticker_batch_size=max(int(os.getenv('SCAN_BULK_TICKER_BATCH_SIZE', '8')), 1),
     exchange_error_cooldown_seconds=max(int(os.getenv('SCAN_EXCHANGE_ERROR_COOLDOWN_SECONDS', '1800')), 60),
     exchange_error_threshold=max(int(os.getenv('SCAN_EXCHANGE_ERROR_THRESHOLD', '3')), 1),
     min_profit_percent=float(os.getenv('MIN_PROFIT_PERCENT', '0.1')),
@@ -200,14 +218,25 @@ config = AppConfig(
         bot_token=os.getenv('TELEGRAM_BOT_TOKEN', ''),
         chat_id=os.getenv('TELEGRAM_CHAT_ID', ''),
     ),
-    pairs=[
+    pairs=_env_symbols(
+        'PAIRS',
+        [
         'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT',
         'XRP/USDT', 'DOGE/USDT', 'ADA/USDT', 'AVAX/USDT',
         'DOT/USDT', 'LINK/USDT', 'LTC/USDT', 'ATOM/USDT',
         'TRX/USDT', 'UNI/USDT', 'APT/USDT', 'SUI/USDT',
         'ARB/USDT', 'OP/USDT', 'POL/USDT', 'FIL/USDT',
         'NEAR/USDT', 'INJ/USDT',
-    ],
+        ],
+    ),
+    symbol_universe_mode=os.getenv('SYMBOL_UNIVERSE_MODE', 'dynamic').strip().lower(),
+    symbol_universe_quote_currency=os.getenv('SYMBOL_UNIVERSE_QUOTE_CURRENCY', 'USDT').strip().upper(),
+    symbol_universe_max_symbols=max(int(os.getenv('SYMBOL_UNIVERSE_MAX_SYMBOLS', '30')), 1),
+    symbol_universe_min_spot_exchanges=max(int(os.getenv('SYMBOL_UNIVERSE_MIN_SPOT_EXCHANGES', '1')), 1),
+    symbol_universe_min_futures_exchanges=max(int(os.getenv('SYMBOL_UNIVERSE_MIN_FUTURES_EXCHANGES', '1')), 1),
+    symbol_universe_min_funding_exchanges=max(int(os.getenv('SYMBOL_UNIVERSE_MIN_FUNDING_EXCHANGES', '2')), 1),
+    symbol_universe_include=_env_symbols('SYMBOL_UNIVERSE_INCLUDE', []),
+    symbol_universe_exclude=_env_symbols('SYMBOL_UNIVERSE_EXCLUDE', []),
     spot_exchange_allowlist=_env_csv(
         'SPOT_EXCHANGE_ALLOWLIST',
         ['binance', 'bybit', 'okx', 'kucoin', 'gateio', 'mexc', 'bitget', 'htx'],

@@ -74,6 +74,21 @@ class FundingPayment:
     id: str = ''
 
 
+@dataclass(frozen=True)
+class MarketDescriptor:
+    exchange_id: str
+    symbol: str
+    base: str
+    quote: str
+    active: bool
+    spot: bool
+    future: bool
+    swap: bool
+    contract: bool
+    linear: bool
+    settle: str = ''
+
+
 class IExchange(abc.ABC):
     info: ExchangeInfo
 
@@ -153,6 +168,10 @@ class IExchange(abc.ABC):
         until: int | None = None,
         limit: int = 100,
     ) -> list[FundingPayment]:
+        ...
+
+    @abc.abstractmethod
+    async def list_markets(self) -> list[MarketDescriptor]:
         ...
 
     @abc.abstractmethod

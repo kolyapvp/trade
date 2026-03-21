@@ -67,6 +67,15 @@ class FuturesFundingDetails:
     target_funding_time: int = 0
     long_taker_fee: float = 0.0
     short_taker_fee: float = 0.0
+    long_bid: float = 0.0
+    long_ask: float = 0.0
+    short_bid: float = 0.0
+    short_ask: float = 0.0
+    long_volume_usdt_24h: float = 0.0
+    short_volume_usdt_24h: float = 0.0
+    funding_income_usdt: float = 0.0
+    total_fees_usdt: float = 0.0
+    total_taker_fee_percent: float = 0.0
 
 
 StrategyDetails = Union[CrossExchangeDetails, TriangularDetails, FuturesSpotDetails, FuturesFundingDetails]
@@ -674,6 +683,15 @@ def _parse_strategy_details(strategy: str, details: dict) -> StrategyDetails:
             target_funding_time=int(details.get('target_funding_time', 0)),
             long_taker_fee=float(details.get('long_taker_fee', 0.0)),
             short_taker_fee=float(details.get('short_taker_fee', 0.0)),
+            long_bid=float(details.get('long_bid', 0.0)),
+            long_ask=float(details.get('long_ask', 0.0)),
+            short_bid=float(details.get('short_bid', 0.0)),
+            short_ask=float(details.get('short_ask', 0.0)),
+            long_volume_usdt_24h=float(details.get('long_volume_usdt_24h', 0.0)),
+            short_volume_usdt_24h=float(details.get('short_volume_usdt_24h', 0.0)),
+            funding_income_usdt=float(details.get('funding_income_usdt', 0.0)),
+            total_fees_usdt=float(details.get('total_fees_usdt', 0.0)),
+            total_taker_fee_percent=float(details.get('total_taker_fee_percent', 0.0)),
         )
     return FuturesSpotDetails(
         spot_exchange=details.get('spot_exchange', ''),

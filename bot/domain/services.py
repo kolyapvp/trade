@@ -299,8 +299,11 @@ class ProfitCalculator:
         total_fees = (long_fee.calculate(position_usdt) + short_fee.calculate(position_usdt)) * 2
         profit_usdt = funding_income - total_fees
         profit_percent = (profit_usdt / position_usdt * 100) if position_usdt > 0 else 0.0
+        total_taker_fee_percent = (total_fees / position_usdt * 100) if position_usdt > 0 else 0.0
         entry_spread_percent = (short_entry - long_entry) / long_entry * 100 if long_entry > 0 else 0.0
         exit_spread_percent = (short_exit - long_exit) / long_exit * 100 if long_exit > 0 else 0.0
+        long_volume_usdt_24h = max(long_ticker.volume, 0.0) * max(long_ticker.last, 0.0)
+        short_volume_usdt_24h = max(short_ticker.volume, 0.0) * max(short_ticker.last, 0.0)
 
         return {
             'is_profitable': profit_usdt > 0,
@@ -311,6 +314,15 @@ class ProfitCalculator:
             'funding_rate_delta': funding_delta,
             'entry_spread_percent': entry_spread_percent,
             'exit_spread_percent': exit_spread_percent,
+            'long_bid': long_ticker.bid or long_ticker.last,
+            'long_ask': long_ticker.ask or long_ticker.last,
+            'short_bid': short_ticker.bid or short_ticker.last,
+            'short_ask': short_ticker.ask or short_ticker.last,
+            'long_volume_usdt_24h': long_volume_usdt_24h,
+            'short_volume_usdt_24h': short_volume_usdt_24h,
+            'funding_income_usdt': funding_income,
+            'total_fees_usdt': total_fees,
+            'total_taker_fee_percent': total_taker_fee_percent,
         }
 
     def _empty(self) -> dict:
@@ -681,5 +693,14 @@ class ArbitrageDetector:
                 target_funding_time=target_funding_time,
                 long_taker_fee=long_fee.taker,
                 short_taker_fee=short_fee.taker,
+                long_bid=result['long_bid'],
+                long_ask=result['long_ask'],
+                short_bid=result['short_bid'],
+                short_ask=result['short_ask'],
+                long_volume_usdt_24h=result['long_volume_usdt_24h'],
+                short_volume_usdt_24h=result['short_volume_usdt_24h'],
+                funding_income_usdt=result['funding_income_usdt'],
+                total_fees_usdt=result['total_fees_usdt'],
+                total_taker_fee_percent=result['total_taker_fee_percent'],
             ),
         )

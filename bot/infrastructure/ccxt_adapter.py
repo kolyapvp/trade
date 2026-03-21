@@ -12,6 +12,7 @@ from ..domain.ports import (
     ExchangeOrder,
     ExchangePosition,
     FundingPayment,
+    MarketDescriptor,
     Ticker,
     FuturesTicker,
 )
@@ -289,6 +290,32 @@ class CcxtExchangeAdapter(IExchange):
                 id=str(item.get('id') or ''),
             ))
         return payments
+
+    async def list_markets(self) -> list[MarketDescriptor]:
+        await self._ensure_markets_loaded()
+        result: list[MarketDescriptor] = []
+        for market_symbol, market in self._exchange.markets.items():
+            base = str(market.get('base') or '')
+            quote = str(market.get('quote') or '')
+            settle = str(market.get('settle') or '')
+            if not base or not quote:
+                continue
+            normalized_symbol = f'{base}/{quote}'
+            self._remember_symbol_alias(normalized_symbol, market_symbol, market)
+            result.append(MarketDescriptor(
+                exchange_id=self.info.id,
+                symbol=normalized_symbol,
+                base=base,
+                quote=quote,
+                active=bool(market.get('active', True)),
+                spot=bool(market.get('spot')),
+                future=bool(market.get('future')),
+                swap=bool(market.get('swap')),
+                contract=bool(market.get('contract')),
+                linear=bool(market.get('linear')),
+                settle=settle,
+            ))
+        return result
 
     def _extract_order_fee(self, raw: dict) -> tuple[str | None, float]:
         fee = raw.get('fee')
@@ -619,7 +646,7 @@ class CcxtExchangeAdapter(IExchange):
     async def _prepare_symbol_map(self, symbols: list[str]) -> dict[str, str]:
         requested_by_market: dict[str, str] = {}
         for symbol in symbols:
-            market_symbol = await self._prepare_symbol(symbol)
+            market_symbol = await self._resolve_alias_symbol(symbol)
             requested_by_market[market_symbol] = symbol
         return requested_by_market
 
@@ -793,29 +820,62 @@ class CcxtExchangeAdapter(IExchange):
         await self._ensure_markets_loaded()
 
         resolved = symbol
+        resolved_market = None
         initial_market = self._exchange.markets.get(symbol)
-        needs_market_lookup = (
-            initial_market is None
-            or bool(initial_market.get('contract')) != self.info.supports_futures
-        )
-        if needs_market_lookup:
-            for alias in SYMBOL_ALIASES.get(symbol, ()):
-                alias_market = self._exchange.markets.get(alias)
-                if alias_market and bool(alias_market.get('contract')) == self.info.supports_futures:
-                    resolved = alias
-                    break
-            if resolved == symbol:
-                base, _, quote = symbol.partition('/')
-                for market_symbol, market in self._exchange.markets.items():
-                    if market.get('base') != base or market.get('quote') != quote:
-                        continue
-                    if bool(market.get('contract')) != self.info.supports_futures:
-                        continue
-                    resolved = market_symbol
-                    break
+        if initial_market and bool(initial_market.get('contract')) == self.info.supports_futures:
+            resolved_market = initial_market
+        for alias in SYMBOL_ALIASES.get(symbol, ()):
+            alias_market = self._exchange.markets.get(alias)
+            if alias_market is None:
+                continue
+            if bool(alias_market.get('contract')) != self.info.supports_futures:
+                continue
+            if self._is_preferred_market(alias_market, resolved_market):
+                resolved = alias
+                resolved_market = alias_market
+        base, _, quote = symbol.partition('/')
+        for market_symbol, market in self._exchange.markets.items():
+            if market.get('base') != base or market.get('quote') != quote:
+                continue
+            if bool(market.get('contract')) != self.info.supports_futures:
+                continue
+            if self._is_preferred_market(market, resolved_market):
+                resolved = market_symbol
+                resolved_market = market
 
         self._symbol_cache[symbol] = resolved
         return resolved
+
+    def _remember_symbol_alias(self, requested_symbol: str, market_symbol: str, market: dict) -> None:
+        current_symbol = self._symbol_cache.get(requested_symbol)
+        if current_symbol is None:
+            self._symbol_cache[requested_symbol] = market_symbol
+            return
+        current_market = self._exchange.markets.get(current_symbol)
+        if self._is_preferred_market(market, current_market):
+            self._symbol_cache[requested_symbol] = market_symbol
+
+    def _is_preferred_market(self, candidate: dict, current: dict | None) -> bool:
+        if current is None:
+            return True
+        return self._market_priority(candidate) > self._market_priority(current)
+
+    def _market_priority(self, market: dict) -> tuple[int, int, int, int, int]:
+        if self.info.supports_futures:
+            return (
+                1 if bool(market.get('active', True)) else 0,
+                1 if bool(market.get('swap')) else 0,
+                1 if bool(market.get('linear')) else 0,
+                1 if str(market.get('settle') or '').upper() == str(market.get('quote') or '').upper() else 0,
+                -len(str(market.get('symbol') or '')),
+            )
+        return (
+            1 if bool(market.get('active', True)) else 0,
+            1 if bool(market.get('spot')) else 0,
+            0,
+            0,
+            -len(str(market.get('symbol') or '')),
+        )
 
     def _is_unknown_symbol_error(self, exc: Exception) -> bool:
         message = str(exc).lower()

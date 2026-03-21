@@ -28,6 +28,8 @@ class TelegramAlertService(IAlertService):
     def _build_message(self, alert: TradeAlert) -> str:
         if alert.alert_type == 'closed':
             return self._build_closed_message(alert)
+        if alert.alert_type == 'signal':
+            return self._build_signal_message(alert)
         return self._build_opened_message(alert)
 
     def _mode_label(self, alert: TradeAlert) -> str:
@@ -51,6 +53,11 @@ class TelegramAlertService(IAlertService):
             f'💰 Позиция: ${alert.position_usdt:.0f}',
         ]
 
+        if alert.details:
+            lines.append('')
+            lines.append('📎 <b>Детали:</b>')
+            lines.extend(alert.details.splitlines())
+
         if alert.workflow:
             lines.append('')
             lines.append('📋 <b>Как работает сделка:</b>')
@@ -61,6 +68,36 @@ class TelegramAlertService(IAlertService):
         lines += [
             '',
             f'📈 За час: <b>{hour_str}</b>  |  За 24ч: <b>{day_str}</b>',
+            f'🕐 {alert.timestamp.strftime("%d.%m.%Y %H:%M:%S")}',
+        ]
+        return '\n'.join(lines)
+
+    def _build_signal_message(self, alert: TradeAlert) -> str:
+        icons = {'cross_exchange': '⇄', 'triangular': '△', 'futures_spot': '◈', 'futures_funding': '⟐'}
+        labels = {'cross_exchange': 'МЕЖБИРЖЕВОЙ', 'triangular': 'ТРЕУГОЛЬНЫЙ', 'futures_spot': 'ФЬЮЧ-СПОТ', 'futures_funding': 'ФАНДИНГ'}
+        icon = icons.get(alert.strategy, '●')
+        label = labels.get(alert.strategy, alert.strategy.upper())
+        mode_label = self._mode_label(alert)
+
+        lines = [
+            f'{icon} <b>[{mode_label}] Сигнал — {label}</b>',
+            f'📊 Пара: <code>{alert.symbol}</code>',
+            f'🟢 Ожид. прибыль: <b>+{alert.profit_percent:.4f}%</b>  /  <b>+${alert.profit_usdt:.4f}</b>',
+            f'💰 Расчётная позиция: ${alert.position_usdt:.0f}',
+        ]
+
+        if alert.details:
+            lines.append('')
+            lines.append('📎 <b>Детали:</b>')
+            lines.extend(alert.details.splitlines())
+
+        if alert.workflow:
+            lines.append('')
+            lines.append('📋 <b>Логика сделки:</b>')
+            lines.extend(alert.workflow)
+
+        lines += [
+            '',
             f'🕐 {alert.timestamp.strftime("%d.%m.%Y %H:%M:%S")}',
         ]
         return '\n'.join(lines)

@@ -18,6 +18,7 @@ from bot.application.use_cases import (
     TriangularPathConfig,
     build_closed_trade_analytics,
 )
+from bot.application.symbol_universe import SymbolUniverseBuilder, SymbolUniverseConfig
 from bot.config import config
 from bot.domain.entities import Portfolio, VirtualTrade
 from bot.domain.services import (
@@ -193,6 +194,36 @@ async def bootstrap() -> None:
             else:
                 dashboard.print_error(f'{ex.info.id} futures недоступны, пропускаем')
 
+        universe_builder = SymbolUniverseBuilder(SymbolUniverseConfig(
+            mode=config.symbol_universe_mode,
+            quote_currency=config.symbol_universe_quote_currency,
+            max_symbols=config.symbol_universe_max_symbols,
+            min_spot_exchanges=config.symbol_universe_min_spot_exchanges,
+            min_futures_exchanges=config.symbol_universe_min_futures_exchanges,
+            min_funding_exchanges=config.symbol_universe_min_funding_exchanges,
+            include_symbols=config.symbol_universe_include,
+            exclude_symbols=config.symbol_universe_exclude,
+        ))
+        universe = await universe_builder.build(
+            active_spot,
+            active_futures,
+            config.pairs,
+            enable_cross_exchange=config.strategies.get('cross_exchange', True),
+            enable_futures_spot=config.strategies.get('futures_spot', True),
+            enable_futures_funding=config.strategies.get('futures_funding', True),
+        )
+        if universe.errors:
+            for error in universe.errors:
+                dashboard.print_error(error)
+        selected_symbols = universe.symbols or config.pairs
+        dashboard.print_info(
+            f'Universe ({config.symbol_universe_mode}): {len(selected_symbols)} symbols'
+        )
+        dashboard.print_info(
+            f'Symbols: {", ".join(selected_symbols[:20])}'
+            f'{" ..." if len(selected_symbols) > 20 else ""}'
+        )
+
         live_spot_exchange_map = {
             exchange.info.id: exchange
             for exchange in active_spot
@@ -248,11 +279,12 @@ async def bootstrap() -> None:
             dashboard.print_info(f'В Postgres backfill закрытых сделок: {backfilled_trades}')
 
         scan_cfg = ScanConfig(
-            symbols=config.pairs,
+            symbols=selected_symbols,
             position_size_usdt=config.max_position_usdt,
             min_profit_percent=config.min_profit_percent,
             triangular_paths=TRIANGULAR_PATHS,
             scan_request_timeout_ms=config.scan_request_timeout_ms,
+            scan_bulk_ticker_batch_size=config.scan_bulk_ticker_batch_size,
             exchange_error_cooldown_seconds=config.exchange_error_cooldown_seconds,
             exchange_error_threshold=config.exchange_error_threshold,
             spot_scan_concurrency=config.spot_scan_concurrency,
@@ -265,6 +297,8 @@ async def bootstrap() -> None:
             futures_spot_book_depth_limit=config.futures_spot_book_depth_limit,
             futures_spot_prefilter_profit_floor_percent=config.futures_spot_prefilter_profit_floor_percent,
             futures_spot_prefilter_max_routes_per_symbol=config.futures_spot_prefilter_max_routes_per_symbol,
+            spot_symbols_by_exchange=universe.spot_symbols_by_exchange,
+            futures_symbols_by_exchange=universe.futures_symbols_by_exchange,
         )
 
         futures_spot_risk = FuturesSpotRiskConfig(

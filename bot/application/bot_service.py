@@ -93,6 +93,8 @@ class ArbitrageBotService:
         self._failed_futures_routes: dict[str, datetime] = {}
         self._failed_route_ttl_seconds = 3600
         self._daily_loss_blocked = False
+        self._signal_alert_cooldowns: dict[str, datetime] = {}
+        self._signal_alert_ttl_seconds = 900
 
     def set_opportunity_handler(self, handler: Callable) -> None:
         self._on_opportunity = handler
@@ -293,12 +295,14 @@ class ArbitrageBotService:
         if opp.strategy == 'futures_funding':
             d = opp.details
             assert isinstance(d, FuturesFundingDetails)
-            return (
-                f'LONG {d.long_exchange}: ${d.long_price:.4f} | '
-                f'SHORT {d.short_exchange}: ${d.short_price:.4f} | '
-                f'Фандинг: {(d.funding_rate_delta * 100):.4f}% | '
-                f'Спред входа: {d.entry_spread_percent:.4f}%'
-            )
+            return '\n'.join([
+                f'LONG {d.long_exchange}: ставка {(d.long_funding_rate * 100):+.4f}% | ask ${d.long_ask:.4f} | bid ${d.long_bid:.4f}',
+                f'SHORT {d.short_exchange}: ставка {(d.short_funding_rate * 100):+.4f}% | ask ${d.short_ask:.4f} | bid ${d.short_bid:.4f}',
+                f'Ставки: {(d.funding_rate_delta * 100):+.4f}% | Спред входа: {d.entry_spread_percent:+.4f}% | Спред выхода: {d.exit_spread_percent:+.4f}%',
+                f'Тейкер вход+выход: {d.total_taker_fee_percent:.4f}% | Ожид. фандинг: ${d.funding_income_usdt:.4f} | Комиссии: ${d.total_fees_usdt:.4f}',
+                f'Оборот 24ч: {self._format_notional(d.long_volume_usdt_24h)} / {self._format_notional(d.short_volume_usdt_24h)}',
+                f'До начисления: {self._format_time_remaining(d.target_funding_time)}',
+            ])
         d = opp.details
         assert isinstance(d, FuturesSpotDetails)
         return (
@@ -337,12 +341,15 @@ class ArbitrageBotService:
             assert isinstance(d, FuturesFundingDetails)
             target_suffix = ''
             if d.target_funding_time:
-                target_suffix = f' около {datetime.fromtimestamp(d.target_funding_time / 1000).strftime("%H:%M")}'
+                target_suffix = (
+                    f' около {datetime.fromtimestamp(d.target_funding_time / 1000).strftime("%H:%M")}'
+                    f' ({self._format_time_remaining(d.target_funding_time)})'
+                )
             return [
                 f'📌 <b>Арбитраж фандинга</b> 🔀 <b>кросс-биржа</b>',
                 f'1️⃣ Открыть <b>LONG</b> на <b>{d.long_exchange}</b> по ${d.long_price:.4f}',
                 f'2️⃣ Открыть <b>SHORT</b> на <b>{d.short_exchange}</b> по ${d.short_price:.4f}',
-                f'3️⃣ Получить разницу фандинга: <b>{(d.funding_rate_delta * 100):+.4f}%</b>',
+                f'3️⃣ Получить разницу ставок: <b>{(d.funding_rate_delta * 100):+.4f}%</b> и удерживать положительный спред',
                 f'4️⃣ Закрыть обе фьючерсные ноги после начисления{target_suffix}',
             ]
 
@@ -440,6 +447,79 @@ class ArbitrageBotService:
             self._on_error(f'PANIC: {reason}')
         if self._alert_service:
             asyncio.create_task(self._alert_service.send_text_alert(f'PANIC: {reason}'))
+
+    def _format_notional(self, value: float) -> str:
+        if value >= 1_000_000_000:
+            return f'${value / 1_000_000_000:.2f}b'
+        if value >= 1_000_000:
+            return f'${value / 1_000_000:.2f}m'
+        if value >= 1_000:
+            return f'${value / 1_000:.2f}k'
+        return f'${value:.2f}'
+
+    def _format_time_remaining(self, target_funding_time: int) -> str:
+        if target_funding_time <= 0:
+            return 'неизвестно'
+        remaining_seconds = max(int(target_funding_time / 1000 - datetime.now().timestamp()), 0)
+        hours = remaining_seconds // 3600
+        minutes = (remaining_seconds % 3600) // 60
+        seconds = remaining_seconds % 60
+        if hours > 0:
+            return f'{hours}ч {minutes}м {seconds}с'
+        if minutes > 0:
+            return f'{minutes}м {seconds}с'
+        return f'{seconds}с'
+
+    def _signal_alert_key(self, opp: ArbitrageOpportunity) -> str:
+        if opp.strategy == 'futures_funding':
+            details = opp.details
+            assert isinstance(details, FuturesFundingDetails)
+            return f'{opp.strategy}:{opp.symbol}:{details.long_exchange}:{details.short_exchange}'
+        if opp.strategy == 'futures_spot':
+            details = opp.details
+            assert isinstance(details, FuturesSpotDetails)
+            return f'{opp.strategy}:{opp.symbol}:{details.spot_exchange}:{details.futures_exchange}'
+        return f'{opp.strategy}:{opp.symbol}'
+
+    def _prune_signal_alert_cooldowns(self) -> None:
+        now = datetime.now()
+        expired = [
+            key
+            for key, cooldown_until in self._signal_alert_cooldowns.items()
+            if cooldown_until <= now
+        ]
+        for key in expired:
+            del self._signal_alert_cooldowns[key]
+
+    def _can_send_signal_alert(self, opp: ArbitrageOpportunity) -> bool:
+        self._prune_signal_alert_cooldowns()
+        key = self._signal_alert_key(opp)
+        cooldown_until = self._signal_alert_cooldowns.get(key)
+        if cooldown_until is not None and cooldown_until > datetime.now():
+            return False
+        self._signal_alert_cooldowns[key] = datetime.fromtimestamp(
+            datetime.now().timestamp() + self._signal_alert_ttl_seconds
+        )
+        return True
+
+    async def _send_signal_alert(self, opp: ArbitrageOpportunity) -> None:
+        if not self._alert_service or not self._can_send_signal_alert(opp):
+            return
+        alert = TradeAlert(
+            strategy=opp.strategy,
+            symbol=opp.symbol,
+            mode=self._mode,
+            profit_percent=opp.profit_percent,
+            profit_usdt=opp.profit_usdt,
+            position_usdt=opp.position_size_usdt,
+            details=self._build_alert_details(opp),
+            workflow=self._build_workflow(opp),
+            profit_last_hour=self._portfolio.profit_last_hour(),
+            profit_last_24h=self._portfolio.profit_last_24h(),
+            timestamp=datetime.now(),
+            alert_type='signal',
+        )
+        await self._alert_service.send_trade_alert(alert)
 
     def _failed_route_key(self, exchange_id: str, symbol: str) -> str:
         return f'{exchange_id}:{symbol}'
@@ -563,6 +643,7 @@ class ArbitrageBotService:
     async def _run_cycle(self) -> None:
         try:
             self._prune_failed_futures_routes()
+            self._prune_signal_alert_cooldowns()
             await self._refresh_deployment_state()
             result = await self._scanner.execute(self._scan_config)
             self._stats.scan_count += 1
@@ -672,6 +753,9 @@ class ArbitrageBotService:
                     continue
                 if self._is_blocked_opportunity(opp):
                     logger.info('skip_blocked_futures_route symbol=%s strategy=%s', opp.symbol, opp.strategy)
+                    continue
+                if opp.strategy in {'futures_spot', 'futures_funding'} and self._mode == 'real' and not self._can_execute_live(opp):
+                    await self._send_signal_alert(opp)
                     continue
                 if not await self._allows_new_trades():
                     logger.info(
