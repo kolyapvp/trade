@@ -673,8 +673,8 @@ class ArbitrageBotService:
 
             if result.errors:
                 self._stats.errors = result.errors[-10:]
+                self._metrics.record_error('scan')
                 for e in result.errors:
-                    self._metrics.record_error('scan')
                     if self._on_error:
                         self._on_error(e)
 

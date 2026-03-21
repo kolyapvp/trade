@@ -2,17 +2,32 @@ from __future__ import annotations
 
 import asyncio
 import json as json_module
-import urllib.request
+import logging
+import ssl
 import urllib.error
+import urllib.request
+from urllib.parse import urlsplit
 from datetime import datetime
 
 from ..domain.ports import IAlertService, TradeAlert
 
+logger = logging.getLogger(__name__)
+
 
 class TelegramAlertService(IAlertService):
-    def __init__(self, bot_token: str, chat_id: str):
+    def __init__(
+        self,
+        bot_token: str,
+        chat_id: str,
+        api_base_url: str = 'https://api.telegram.org',
+        api_host_override: str = '',
+        insecure_ssl: bool = False,
+    ):
         self._bot_token = bot_token
         self._chat_id = chat_id
+        self._api_base_url = api_base_url.rstrip('/')
+        self._api_host_override = api_host_override.strip()
+        self._ssl_context = self._build_ssl_context(insecure_ssl)
 
     async def send_trade_alert(self, alert: TradeAlert) -> None:
         if not self._bot_token or not self._chat_id:
@@ -166,12 +181,35 @@ class TelegramAlertService(IAlertService):
             'text': text,
             'parse_mode': 'HTML',
         }).encode('utf-8')
+        headers = {'Content-Type': 'application/json'}
+        if self._api_host_override:
+            headers['Host'] = self._api_host_override
         req = urllib.request.Request(
-            f'https://api.telegram.org/bot{self._bot_token}/sendMessage',
+            f'{self._api_base_url}/bot{self._bot_token}/sendMessage',
             data=body,
-            headers={'Content-Type': 'application/json'},
+            headers=headers,
         )
         try:
-            urllib.request.urlopen(req, timeout=10)
+            with urllib.request.urlopen(req, timeout=10, context=self._ssl_context) as response:
+                response.read()
+        except urllib.error.HTTPError as exc:
+            response_body = exc.read().decode('utf-8', errors='replace')
+            logger.warning('telegram_send_failed status=%s body=%s', exc.code, response_body)
+        except urllib.error.URLError as exc:
+            logger.warning('telegram_send_failed reason=%s', exc.reason)
         except Exception:
-            pass
+            logger.exception('telegram_send_failed')
+
+    def _build_ssl_context(self, insecure_ssl: bool) -> ssl.SSLContext | None:
+        if not insecure_ssl:
+            return None
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        target_host = urlsplit(self._api_base_url).hostname or ''
+        logger.warning(
+            'telegram_insecure_ssl_enabled api_host=%s host_override=%s',
+            target_host,
+            self._api_host_override,
+        )
+        return context

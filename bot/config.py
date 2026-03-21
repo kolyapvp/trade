@@ -19,6 +19,9 @@ class ExchangeCredentials:
 class TelegramConfig:
     bot_token: str
     chat_id: str
+    api_base_url: str
+    api_host_override: str
+    insecure_ssl: bool
 
 
 @dataclass
@@ -219,6 +222,9 @@ config = AppConfig(
     telegram=TelegramConfig(
         bot_token=os.getenv('TELEGRAM_BOT_TOKEN', ''),
         chat_id=os.getenv('TELEGRAM_CHAT_ID', ''),
+        api_base_url=os.getenv('TELEGRAM_API_BASE_URL', 'https://api.telegram.org').rstrip('/'),
+        api_host_override=os.getenv('TELEGRAM_API_HOST_OVERRIDE', '').strip(),
+        insecure_ssl=_env_bool('TELEGRAM_INSECURE_SSL', False),
     ),
     pairs=_env_symbols(
         'PAIRS',

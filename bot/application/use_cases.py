@@ -162,6 +162,7 @@ class ScanOpportunitiesUseCase:
                 return
             tickers: dict[str, Ticker] = {}
             bulk_failed = False
+            unresolved_batch_errors: dict[str, str] = {}
             try:
                 fetched_tickers, batch_errors = await run_with_timeout(
                     self._fetch_ticker_batches(
@@ -171,9 +172,7 @@ class ScanOpportunitiesUseCase:
                     )
                 )
                 tickers.update({ticker.symbol: ticker for ticker in fetched_tickers})
-                for error in batch_errors:
-                    errors.append(f'{exchange.info.id} ticker {error}')
-                bulk_failed = bool(batch_errors)
+                unresolved_batch_errors.update(batch_errors)
             except Exception as e:
                 errors.append(f'{exchange.info.id} tickers: {self._describe_exception(e)}')
                 bulk_failed = True
@@ -186,10 +185,15 @@ class ScanOpportunitiesUseCase:
                     async with ticker_semaphore:
                         try:
                             tickers[symbol] = await run_with_timeout(exchange.fetch_ticker(symbol))
+                            unresolved_batch_errors.pop(symbol, None)
                         except Exception as e:
+                            unresolved_batch_errors.pop(symbol, None)
                             errors.append(f'{exchange.info.id} ticker {symbol}: {self._describe_exception(e)}')
 
                 await asyncio.gather(*[load_ticker(symbol) for symbol in missing_tickers], return_exceptions=True)
+            for symbol, error in unresolved_batch_errors.items():
+                errors.append(f'{exchange.info.id} ticker {symbol}: {error}')
+            bulk_failed = bulk_failed or bool(unresolved_batch_errors)
 
             if tickers and self._has_sufficient_symbol_coverage(len(tickers), len(target_symbols)):
                 self._mark_exchange_success(exchange_key)
@@ -276,6 +280,7 @@ class ScanOpportunitiesUseCase:
                     return
                 cache: dict[str, FuturesTicker] = {}
                 bulk_failed = False
+                unresolved_batch_errors: dict[str, str] = {}
                 try:
                     fetched_tickers, batch_errors = await run_with_timeout(
                         self._fetch_ticker_batches(
@@ -285,9 +290,7 @@ class ScanOpportunitiesUseCase:
                         )
                     )
                     cache.update({ticker.symbol: ticker for ticker in fetched_tickers})
-                    for error in batch_errors:
-                        errors.append(f'futures {futures_ex.info.id} {error}')
-                    bulk_failed = bool(batch_errors)
+                    unresolved_batch_errors.update(batch_errors)
                 except Exception as e:
                     errors.append(f'futures {futures_ex.info.id} tickers: {self._describe_exception(e)}')
                     bulk_failed = True
@@ -302,12 +305,17 @@ class ScanOpportunitiesUseCase:
                                 ft = await run_with_timeout(futures_ex.fetch_futures_ticker(symbol))
                                 if ft:
                                     cache[symbol] = ft
+                                    unresolved_batch_errors.pop(symbol, None)
                             except Exception as e:
+                                unresolved_batch_errors.pop(symbol, None)
                                 errors.append(
                                     f'futures {futures_ex.info.id} {symbol}: {self._describe_exception(e)}'
                                 )
 
                     await asyncio.gather(*[load_symbol(symbol) for symbol in missing_symbols], return_exceptions=True)
+                for symbol, error in unresolved_batch_errors.items():
+                    errors.append(f'futures {futures_ex.info.id} {symbol}: {error}')
+                bulk_failed = bulk_failed or bool(unresolved_batch_errors)
                 if cache and self._has_sufficient_symbol_coverage(len(cache), len(target_symbols)):
                     self._mark_exchange_success(exchange_key)
                     futures_tickers_cache[futures_ex.info.id] = cache
@@ -618,29 +626,29 @@ class ScanOpportunitiesUseCase:
         fetcher,
         symbols: list[str],
         batch_size: int,
-    ) -> tuple[list[Ticker] | list[FuturesTicker], list[str]]:
+    ) -> tuple[list[Ticker] | list[FuturesTicker], dict[str, str]]:
         if not symbols:
-            return [], []
+            return [], {}
 
-        async def fetch_batch(batch: list[str]) -> tuple[list[Ticker] | list[FuturesTicker], list[str]]:
+        async def fetch_batch(batch: list[str]) -> tuple[list[Ticker] | list[FuturesTicker], dict[str, str]]:
             try:
-                return await fetcher(batch), []
+                return await fetcher(batch), {}
             except Exception as e:
                 if len(batch) == 1:
-                    return [], [f'{batch[0]}: {self._describe_exception(e)}']
+                    return [], {batch[0]: self._describe_exception(e)}
                 middle = len(batch) // 2
                 left_items, left_errors = await fetch_batch(batch[:middle])
                 right_items, right_errors = await fetch_batch(batch[middle:])
-                return [*left_items, *right_items], [*left_errors, *right_errors]
+                return [*left_items, *right_items], {**left_errors, **right_errors}
 
         normalized_batch_size = max(batch_size, 1)
         result: list[Ticker] | list[FuturesTicker] = []
-        errors: list[str] = []
+        errors: dict[str, str] = {}
         for start in range(0, len(symbols), normalized_batch_size):
             batch = symbols[start:start + normalized_batch_size]
             items, batch_errors = await fetch_batch(batch)
             result.extend(items)
-            errors.extend(batch_errors)
+            errors.update(batch_errors)
         return result, errors
 
     def _exchange_scope_key(self, market_type: str, exchange_id: str) -> str:

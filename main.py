@@ -263,8 +263,16 @@ async def bootstrap() -> None:
 
         alert_service = None
         if config.telegram.bot_token and config.telegram.chat_id:
-            alert_service = TelegramAlertService(config.telegram.bot_token, config.telegram.chat_id)
+            alert_service = TelegramAlertService(
+                config.telegram.bot_token,
+                config.telegram.chat_id,
+                config.telegram.api_base_url,
+                config.telegram.api_host_override,
+                config.telegram.insecure_ssl,
+            )
             dashboard.print_success('Telegram-алерты подключены')
+            if config.telegram.api_base_url != 'https://api.telegram.org':
+                dashboard.print_info(f'Telegram endpoint: {config.telegram.api_base_url}')
         else:
             dashboard.print_info('Telegram-алерты отключены (TELEGRAM_BOT_TOKEN не задан)')
 

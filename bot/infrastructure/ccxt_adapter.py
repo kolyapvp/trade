@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Optional
 
 import ccxt.async_support as ccxt
@@ -17,6 +18,8 @@ from ..domain.ports import (
     FuturesTicker,
 )
 from ..domain.value_objects import Fee, OrderBook, OrderBookLevel
+
+logger = logging.getLogger(__name__)
 
 
 SYMBOL_ALIASES: dict[str, tuple[str, ...]] = {
@@ -77,7 +80,11 @@ class CcxtExchangeAdapter(IExchange):
         if not self._exchange.has.get('fetchTickers'):
             raise RuntimeError(f'{self.info.id} does not support fetch_tickers')
         requested_by_market = await self._prepare_symbol_map(symbols)
-        raw = await self._exchange.fetch_tickers(list(requested_by_market))
+        raw = await self._invoke_public_data_call(
+            'fetch_tickers',
+            self._exchange.fetch_tickers,
+            list(requested_by_market),
+        )
         result: list[Ticker] = []
         for market_symbol, requested_symbol in requested_by_market.items():
             ticker = raw.get(market_symbol)
@@ -107,7 +114,11 @@ class CcxtExchangeAdapter(IExchange):
             raise RuntimeError(f'{self.info.id} does not support fetch_tickers')
 
         requested_by_market = await self._prepare_symbol_map(symbols)
-        raw_tickers = await self._exchange.fetch_tickers(list(requested_by_market))
+        raw_tickers = await self._invoke_public_data_call(
+            'fetch_tickers',
+            self._exchange.fetch_tickers,
+            list(requested_by_market),
+        )
         funding_map = await self._fetch_funding_rates(list(requested_by_market))
 
         result: list[FuturesTicker] = []
@@ -631,12 +642,22 @@ class CcxtExchangeAdapter(IExchange):
         market_symbol = await self._prepare_symbol(symbol)
         method = getattr(self._exchange, method_name)
         try:
-            return market_symbol, await method(market_symbol, *args)
+            return market_symbol, await self._invoke_public_data_call(
+                method_name,
+                method,
+                market_symbol,
+                *args,
+            )
         except Exception as exc:
             fallback_symbol = await self._resolve_symbol_from_exception(symbol, exc)
             if fallback_symbol == market_symbol:
                 raise
-            return fallback_symbol, await method(fallback_symbol, *args)
+            return fallback_symbol, await self._invoke_public_data_call(
+                method_name,
+                method,
+                fallback_symbol,
+                *args,
+            )
 
     async def _prepare_symbol(self, symbol: str) -> str:
         if self._requires_market_bootstrap:
@@ -649,6 +670,21 @@ class CcxtExchangeAdapter(IExchange):
             market_symbol = await self._resolve_alias_symbol(symbol)
             requested_by_market[market_symbol] = symbol
         return requested_by_market
+
+    async def _invoke_public_data_call(self, operation_name: str, operation, *args):
+        try:
+            return await operation(*args)
+        except Exception as exc:
+            if not self._is_retryable_public_data_error(exc):
+                raise
+            logger.warning(
+                'retry_public_data_call exchange=%s operation=%s reason=%s',
+                self.info.id,
+                operation_name,
+                self._describe_exception(exc),
+            )
+            await asyncio.sleep(0.25)
+            return await operation(*args)
 
     async def _get_market(self, symbol: str) -> tuple[str, dict]:
         await self._ensure_markets_loaded()
@@ -880,3 +916,22 @@ class CcxtExchangeAdapter(IExchange):
     def _is_unknown_symbol_error(self, exc: Exception) -> bool:
         message = str(exc).lower()
         return 'does not have market symbol' in message or 'badsymbol' in message
+
+    def _is_retryable_public_data_error(self, exc: Exception) -> bool:
+        if isinstance(exc, (ccxt.NetworkError, ccxt.ExchangeNotAvailable, ccxt.RequestTimeout)):
+            return True
+        message = str(exc).lower()
+        return (
+            'exchangenotavailable' in message
+            or 'requesttimeout' in message
+            or 'timeout' in message
+            or 'networkerror' in message
+            or 'connection reset' in message
+            or 'temporarily unavailable' in message
+        )
+
+    def _describe_exception(self, exc: Exception) -> str:
+        message = str(exc).strip()
+        if message:
+            return f'{type(exc).__name__}: {message}'
+        return type(exc).__name__
