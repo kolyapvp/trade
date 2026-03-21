@@ -86,11 +86,25 @@ deploy_prebuilt_image() {
   local registry="$2"
   local username="$3"
   local password="$4"
+  local expected_image_id
+  local bot_container_id
+  local actual_image_id
   echo "deploying prebuilt image: $image_ref"
   login_registry "$registry" "$username" "$password"
   docker pull "$image_ref"
   docker tag "$image_ref" "$DEPLOY_IMAGE_LOCAL_TAG"
+  expected_image_id="$(docker image inspect -f '{{.Id}}' "$DEPLOY_IMAGE_LOCAL_TAG")"
   TRADE_BOT_IMAGE="$DEPLOY_IMAGE_LOCAL_TAG" compose up -d --force-recreate --no-build --wait --wait-timeout "$WAIT_TIMEOUT_SECONDS" $ROLLING_SERVICES
+  bot_container_id="$(compose ps -q "$BOT_SERVICE")"
+  if [ -z "$bot_container_id" ]; then
+    echo "bot container is missing after deploy"
+    exit 1
+  fi
+  actual_image_id="$(docker inspect -f '{{.Image}}' "$bot_container_id")"
+  if [ "$actual_image_id" != "$expected_image_id" ]; then
+    echo "deployed container image mismatch: expected $expected_image_id got $actual_image_id"
+    exit 1
+  fi
 }
 
 drain_requested=0
