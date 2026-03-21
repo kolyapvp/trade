@@ -4,6 +4,7 @@ set -euo pipefail
 REPO_DIR="${REPO_DIR:-/opt/trade}"
 BRANCH="${BRANCH:-main}"
 TARGET_SHA="${TARGET_SHA:-}"
+LOCK_FILE="${LOCK_FILE:-/tmp/tradebot-deploy.lock}"
 DEPLOY_IMAGE="${DEPLOY_IMAGE:-}"
 DEPLOY_IMAGE_REGISTRY="${DEPLOY_IMAGE_REGISTRY:-}"
 DEPLOY_IMAGE_USERNAME="${DEPLOY_IMAGE_USERNAME:-}"
@@ -25,6 +26,12 @@ FALLBACK_IMAGE_PASSWORD="${FALLBACK_IMAGE_PASSWORD:-}"
 cd "$REPO_DIR"
 
 BUILD_LOG="$(mktemp -t tradebot-deploy-build.XXXXXX.log)"
+
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  echo "another deploy is already running"
+  exit 1
+fi
 
 compose() {
   docker compose "$@"
@@ -112,7 +119,7 @@ else
   REMOTE_SHA="$(git rev-parse "origin/$BRANCH")"
 fi
 
-if [ "$LOCAL_SHA" = "$REMOTE_SHA" ]; then
+if [ "$LOCAL_SHA" = "$REMOTE_SHA" ] && [ -z "$DEPLOY_IMAGE" ]; then
   echo "no changes to deploy"
   exit 0
 fi
