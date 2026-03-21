@@ -4,6 +4,10 @@ set -euo pipefail
 REPO_DIR="${REPO_DIR:-/opt/trade}"
 BRANCH="${BRANCH:-main}"
 TARGET_SHA="${TARGET_SHA:-}"
+DEPLOY_IMAGE="${DEPLOY_IMAGE:-}"
+DEPLOY_IMAGE_REGISTRY="${DEPLOY_IMAGE_REGISTRY:-}"
+DEPLOY_IMAGE_USERNAME="${DEPLOY_IMAGE_USERNAME:-}"
+DEPLOY_IMAGE_PASSWORD="${DEPLOY_IMAGE_PASSWORD:-}"
 BOT_SERVICE="${BOT_SERVICE:-trade-bot}"
 REDIS_SERVICE="${REDIS_SERVICE:-redis}"
 DEPLOYMENT_KEY="${DEPLOYMENT_KEY:-tradebot:deployment}"
@@ -59,11 +63,25 @@ build_failed_due_to_pypi() {
     "$log_file"
 }
 
-login_fallback_registry() {
-  if [ -z "$FALLBACK_IMAGE_REGISTRY" ] || [ -z "$FALLBACK_IMAGE_USERNAME" ] || [ -z "$FALLBACK_IMAGE_PASSWORD" ]; then
+login_registry() {
+  local registry="$1"
+  local username="$2"
+  local password="$3"
+  if [ -z "$registry" ] || [ -z "$username" ] || [ -z "$password" ]; then
     return 0
   fi
-  printf '%s\n' "$FALLBACK_IMAGE_PASSWORD" | docker login "$FALLBACK_IMAGE_REGISTRY" -u "$FALLBACK_IMAGE_USERNAME" --password-stdin
+  printf '%s\n' "$password" | docker login "$registry" -u "$username" --password-stdin
+}
+
+deploy_prebuilt_image() {
+  local image_ref="$1"
+  local registry="$2"
+  local username="$3"
+  local password="$4"
+  echo "deploying prebuilt image: $image_ref"
+  login_registry "$registry" "$username" "$password"
+  TRADE_BOT_IMAGE="$image_ref" compose pull "$BOT_SERVICE"
+  TRADE_BOT_IMAGE="$image_ref" compose up -d --no-build --wait --wait-timeout "$WAIT_TIMEOUT_SECONDS" $ROLLING_SERVICES
 }
 
 drain_requested=0
@@ -136,6 +154,14 @@ if [ -n "$bot_container_id" ] && [ "$(docker inspect -f '{{.State.Running}}' "$b
   done
 fi
 
+if [ -n "$DEPLOY_IMAGE" ]; then
+  deploy_prebuilt_image "$DEPLOY_IMAGE" "$DEPLOY_IMAGE_REGISTRY" "$DEPLOY_IMAGE_USERNAME" "$DEPLOY_IMAGE_PASSWORD"
+  clear_deployment_state "$REMOTE_SHA"
+  drain_requested=0
+  compose ps
+  exit 0
+fi
+
 if compose up -d --build --wait --wait-timeout "$WAIT_TIMEOUT_SECONDS" $ROLLING_SERVICES 2>&1 | tee "$BUILD_LOG"; then
   clear_deployment_state "$REMOTE_SHA"
   drain_requested=0
@@ -154,9 +180,7 @@ if [ -z "$FALLBACK_IMAGE" ]; then
 fi
 
 echo "build failed due to PyPI availability, using fallback image: $FALLBACK_IMAGE"
-login_fallback_registry
-TRADE_BOT_IMAGE="$FALLBACK_IMAGE" compose pull "$BOT_SERVICE"
-TRADE_BOT_IMAGE="$FALLBACK_IMAGE" compose up -d --no-build --wait --wait-timeout "$WAIT_TIMEOUT_SECONDS" $ROLLING_SERVICES
+deploy_prebuilt_image "$FALLBACK_IMAGE" "$FALLBACK_IMAGE_REGISTRY" "$FALLBACK_IMAGE_USERNAME" "$FALLBACK_IMAGE_PASSWORD"
 clear_deployment_state "$REMOTE_SHA"
 drain_requested=0
 compose ps
