@@ -102,11 +102,12 @@ jobs:
       DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
       DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
       DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+      GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
       TARGET_SHA: ${{ github.sha }}
       DEPLOY_IMAGE: ${{ needs.build_release_image.outputs.deploy_image }}
       DEPLOY_IMAGE_REGISTRY: ghcr.io
       DEPLOY_IMAGE_USERNAME: ${{ github.repository_owner }}
-      DEPLOY_IMAGE_PASSWORD: ${{ secrets.GHCR_READ_TOKEN != '' && secrets.GHCR_READ_TOKEN || secrets.GITHUB_TOKEN }}
+      DEPLOY_IMAGE_PASSWORD: ${{ secrets.GHCR_READ_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -116,6 +117,7 @@ jobs:
           test -n "$DEPLOY_HOST"
           test -n "$DEPLOY_USER"
           test -n "$DEPLOY_SSH_KEY"
+          test -n "$GHCR_READ_TOKEN"
 
       - name: Configure SSH
         run: |
